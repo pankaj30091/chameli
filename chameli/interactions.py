@@ -29,15 +29,22 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .config import get_config
 
+
 # Define COMMASPACE explicitly
 COMMASPACE = ", "
-config = get_config()
+
+
+def get_dynamic_config():
+    return get_config()
+
+
 logger = logging.getLogger(__name__)
 
 
 # Global variable to store the connection
 remote_connection = None
 is_remote = False  # Flag to indicate if the system is remote or local
+
 
 def initialize_connection(remote_server=None):
     """
@@ -71,8 +78,10 @@ def initialize_connection(remote_server=None):
         is_remote = False
         print("Using local system.")
 
-remote_server = config.get("remote_server", {})
+
+remote_server = get_dynamic_config().get("remote_server", {})
 initialize_connection(remote_server)
+
 
 def cleanup_connection():
     """
@@ -86,7 +95,7 @@ def cleanup_connection():
         is_remote = False
         print("Connection to remote server closed.")
 
-        
+
 def normalize_path(path):
     """
     Normalize file paths based on the operating system.
@@ -127,7 +136,7 @@ def readRDS(filename):
     Returns:
         pandas.DataFrame: The data read from the RDS file.
     """
-    filename=normalize_path(filename)
+    filename = normalize_path(filename)
     if is_remote:
         try:
             # Create a temporary file in a cross-platform way
@@ -174,6 +183,7 @@ def readRDS(filename):
             if os.path.exists(filename):
                 logger.error(f"File size: {os.path.getsize(filename)} bytes")
             raise
+
 
 def saveRDS(pd_file, path):
     """
@@ -309,6 +319,7 @@ def file_exists_and_valid(file_path, min_size=1000):
         except Exception as e:
             logger.error(f"Failed to check file locally: {e}")
             raise
+
 
 def read_csv_in_pandas_out(file_path, **kwargs):
     """
@@ -466,8 +477,11 @@ def make_directory(directory_path):
 
     if is_remote:
         try:
-            command = f"mkdir -p {directory_path}" if os.name == "posix" else \
-                      f"powershell -Command \"New-Item -ItemType Directory -Force -Path '{directory_path}'\""
+            command = (
+                f"mkdir -p {directory_path}"
+                if os.name == "posix"
+                else f"powershell -Command \"New-Item -ItemType Directory -Force -Path '{directory_path}'\""
+            )
             stdin, stdout, stderr = remote_connection.exec_command(command)
             exit_status = stdout.channel.recv_exit_status()
             if exit_status != 0:
@@ -516,6 +530,7 @@ def list_directory(directory_path):
         except Exception as e:
             logger.error(f"Failed to list directory locally: {e}")
             raise
+
 
 def send_mail(send_from, send_to, password, subject, text, files=None, is_html=False):
     if not isinstance(send_to, list):
@@ -639,7 +654,7 @@ def get_session_or_driver(
             os.environ["DISPLAY"] = f":{str(desktop_session)}"
 
         # Use the user-provided WebDriver path if available, otherwise fall back to the YAML config
-        driver_path = webdriver_path if webdriver_path else config.get("driver_path", "")
+        driver_path = webdriver_path if webdriver_path else get_dynamic_config().get("driver_path", "")
         service = Service(driver_path)
         driver = webdriver.Firefox(service=service, options=options)
 
@@ -768,7 +783,7 @@ def get_session_or_driver(
             """Fetch proxies from sslproxies.org using Selenium."""
             options = Options()
             options.add_argument("--headless")
-            driver_path = webdriver_path if webdriver_path else config.get("driver_path", "")
+            driver_path = webdriver_path if webdriver_path else get_dynamic_config().get("driver_path", "")
             service = Service(driver_path)
             driver = webdriver.Firefox(service=service, options=options)
 

@@ -11,15 +11,18 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-config = get_config()
 pd.options.display.float_format = "{:.2f}".format
+
+
+def get_dynamic_config():
+    return get_config()
 
 
 def load_holidays_by_exchange():
     """Load holidays for each exchange from the config.yaml file and convert them to dt.date."""
 
     holidays_by_exchange = {}
-    for exchange, details in config.get("markets", {}).items():
+    for exchange, details in get_dynamic_config().get("markets", {}).items():
         holiday_dates = details.get("holidays", [])
         # Convert holiday strings to dt.date objects
         holidays_by_exchange[exchange] = [dt.datetime.strptime(date, "%Y-%m-%d").date() for date in holiday_dates]
@@ -38,7 +41,7 @@ def load_timings_by_exchange():
               dictionaries containing `open_time` and `close_time` as `datetime.time` objects.
     """
     timings_by_exchange = {}
-    for exchange, details in config.get("markets", {}).items():
+    for exchange, details in get_dynamic_config().get("markets", {}).items():
         open_time_str = details.get("open_time")
         close_time_str = details.get("close_time")
         tz = details.get("timezone")
@@ -547,20 +550,31 @@ def is_aware(datetime_: Union[pd.Timestamp, dt.datetime]) -> bool:
 
 
 def get_aware_dt(datetime_: Union[dt.datetime, pd.Timestamp], tz="Asia/Kolkata") -> Union[dt.datetime, pd.Timestamp]:
-    """Adds/Amends timezone of datetime
-    If input is aware, timezone is changed
-    If input is naive, local timezone is added
-
-    Args:
-        datetime_ (Union[dt.datetime,pd.Timestamp]): input time which needs timezone modification
-
-    Raises:
-        ValueError: If input type does not conform
-
-    Returns:
-        Union[dt.datetime,pd.Timestamp]: aware datetime
     """
-    tzLocal = pytz.timezone(config.get("tz"))
+    Converts a naive or timezone-aware datetime object to a timezone-aware datetime object
+    in the specified timezone.
+    Parameters:
+    ----------
+    datetime_ : Union[datetime.datetime, pandas.Timestamp]
+        The input datetime object, which can be either naive or timezone-aware.
+    tz : str, optional
+        The target timezone to convert or localize the datetime object to.
+        Defaults to "Asia/Kolkata".
+    Returns:
+    -------
+    Union[datetime.datetime, pandas.Timestamp]
+        A timezone-aware datetime object in the specified timezone.
+    Raises:
+    ------
+    ValueError
+        If the input is not of type `datetime.datetime` or `pandas.Timestamp`.
+    Notes:
+    ------
+    - If the input datetime is naive, it will be localized to the specified timezone.
+    - If the input datetime is already timezone-aware, it will be converted to the specified timezone.
+    """
+
+    tzLocal = pytz.timezone(tz)
     if isinstance(datetime_, dt.datetime):
         if is_aware(datetime_):
             # convert aware to another timezone
@@ -570,11 +584,11 @@ def get_aware_dt(datetime_: Union[dt.datetime, pd.Timestamp], tz="Asia/Kolkata")
     elif isinstance(datetime_, pd.Timestamp):
         if is_aware(datetime_):
             # convert aware to tzLocal
-            return datetime_.tz_convert(config.get("tz"))
+            return datetime_.tz_convert(tz)
             return datetime_
         else:
             # convert naive to tzLocal
-            return datetime_.tz_localize(config.get("tz"))
+            return datetime_.tz_localize(tz)
     else:
         raise ValueError("Input should be either datetime.datetime or pd.Timestamp")
 

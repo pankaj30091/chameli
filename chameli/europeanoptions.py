@@ -21,7 +21,9 @@ def my_handler(typ, value, trace):
     logger.error("%s %s %s", typ.__name__, value, "".join(traceback.format_tb(trace)))
 
 
-config = get_config()
+def get_dynamic_config():
+    return get_config()
+
 
 sys.excepthook = my_handler
 
