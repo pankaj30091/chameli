@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.o
+*.dll
+
+# Virtual environments
+.venv/
+.env
+env/
+
+# Logs
+logs/
+temp/
+*.log
+
+# IDE files
+.vscode/
+.idea/
+
+# dist
+dist/
+build/
+docs/
+examples/
+chameli.egg-info/
+tests/
+
+# environment
+setup.cfg
+chameli/testing
+chameli/config/config_prod.yaml
+chameli/config_extra_fn.py

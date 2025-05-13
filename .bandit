@@ -1,0 +1,5 @@
+[bandit]
+exclude_dirs:
+  - dist
+  - docs
+  - tests

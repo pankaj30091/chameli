@@ -1,0 +1,55 @@
+[tool.black]
+line-length = 88
+
+[tool.flake8]
+max-line-length = 88
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["yaml", "pytz","requests"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "pyreadr", "rpy2", "pandas", "scipy"]
+ignore_missing_imports = true
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"chameli" = ["config/config_sample.yaml"]
+
+[project]
+name = "chameli"  
+version = "0.1.1"  
+description = "A lightweight Python library for python utilities for holidays, dates, options and other tools"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Pankaj Sharma", email = "sharma.pankaj.kumar@gmail.com" }
+]
+dependencies = [
+    "numpy==1.26.4",
+    "pandas==2.2.3",
+    "scikit-learn==1.5.0",
+    "scipy==1.11.4",
+    "pyyaml==6.0",
+    "pyreadr==0.5.0",
+    "rpy2==3.5.16",
+    "pytz==2024.1",
+    "selenium==4.0.0",
+    "requests==2.32.3",
+    "psutil==7.0.0",
+    "scp==0.15.0",
+    "paramiko==3.5.1",
+]
+
+[project.urls]
+homepage = "https://bitbucket.org/incurrency/chameli"  
+repository = "https://bitbucket.org/incurrency/chameli"
