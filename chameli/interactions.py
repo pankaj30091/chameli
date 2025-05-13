@@ -479,7 +479,7 @@ def make_directory(directory_path):
         try:
             command = (
                 f"mkdir -p {directory_path}"
-                if os.name == "posix"
+                if os.name == "nt"
                 else f"powershell -Command \"New-Item -ItemType Directory -Force -Path '{directory_path}'\""
             )
             stdin, stdout, stderr = remote_connection.exec_command(command)
