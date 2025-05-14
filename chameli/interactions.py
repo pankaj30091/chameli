@@ -79,8 +79,28 @@ def initialize_connection(remote_server=None):
         print("Using local system.")
 
 
+def get_os():
+    """
+    Get the operating system type of the current system (local or remote).
+
+    Returns:
+        str: The OS type ("Linux" or "NT").
+    """
+    if is_remote:
+        try:
+            stdin, stdout, stderr = remote_connection.exec_command("uname")
+            os_type = stdout.read().decode().strip()
+            return "Linux" if os_type == "Linux" else "NT"
+        except Exception as e:
+            logger.error(f"Failed to get remote OS type: {e}")
+            raise
+    else:
+        return "Linux" if os.name == "posix" else "NT"
+
+
 remote_server = get_dynamic_config().get("remote_server", {})
 initialize_connection(remote_server)
+system_os = get_os()
 
 
 def cleanup_connection():
@@ -107,21 +127,17 @@ def normalize_path(path):
         str: The normalized file path.
     """
     if is_remote:
-        # Detect the remote OS
-        stdin, stdout, stderr = remote_connection.exec_command("uname")
-        os_type = stdout.read().decode().strip()
-
-        if os_type == "Linux":
+        if system_os == "Linux":
             return str(PurePosixPath(path.replace("\\", "/")))
-        elif os_type == "Windows_NT":
+        elif system_os == "NT":
             return str(PureWindowsPath(path.replace("/", "\\")))
         else:
             return path
     else:
         # Local system
-        if os.name == "posix":  # Linux or macOS
+        if system_os == "Linux":  # Linux or macOS
             return str(PurePosixPath(path.replace("\\", "/")))
-        elif os.name == "nt":  # Windows
+        elif system_os == "NT":  # Windows
             return str(PureWindowsPath(path.replace("/", "\\")))
         return path
 
@@ -466,25 +482,6 @@ def read_file(source_file):
             return file.read()
 
 
-def get_remote_os():
-    """
-    Get the operating system type of the remote server.
-
-    Returns:
-        str: The OS type (e.g., "Linux", "Windows_NT").
-    """
-    if is_remote:
-        try:
-            stdin, stdout, stderr = remote_connection.exec_command("uname")
-            os_type = stdout.read().decode().strip()
-            return os_type
-        except Exception as e:
-            logger.error(f"Failed to get remote OS type: {e}")
-            raise
-    else:
-        return os.name  # Local system OS type
-
-
 def directory_exists(directory_path):
     """
     Check if a directory exists locally or on a remote server.
@@ -498,13 +495,12 @@ def directory_exists(directory_path):
     directory_path = normalize_path(directory_path)
 
     if is_remote:
-        os_type = get_remote_os()
-        if os_type == "Linux":  # For POSIX systems
+        if system_os == "Linux":  # For POSIX systems
             command = f"test -d {directory_path} && echo exists || echo not_exists"
-        elif os_type == "Windows_NT":  # For Windows systems
+        elif system_os == "NT":  # For Windows systems
             command = f"if exist {directory_path} (echo exists) else (echo not_exists)"
         else:
-            raise Exception(f"Unsupported remote OS: {os_type}")
+            raise Exception("Unsupported remote OS")
         # Execute the command
         stdin, stdout, stderr = remote_connection.exec_command(command)
         result = stdout.read().decode().strip()
@@ -528,10 +524,9 @@ def make_directory(directory_path):
 
     if is_remote:
         try:
-            os_type = get_remote_os()
             command = (
                 f"mkdir -p {directory_path}"
-                if os_type == "Linux"
+                if system_os == "Linux"
                 else f"powershell -Command \"New-Item -ItemType Directory -Force -Path '{directory_path}'\""
             )
             stdin, stdout, stderr = remote_connection.exec_command(command)
