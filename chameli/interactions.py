@@ -466,6 +466,54 @@ def read_file(source_file):
             return file.read()
 
 
+def get_remote_os():
+    """
+    Get the operating system type of the remote server.
+
+    Returns:
+        str: The OS type (e.g., "Linux", "Windows_NT").
+    """
+    if is_remote:
+        try:
+            stdin, stdout, stderr = remote_connection.exec_command("uname")
+            os_type = stdout.read().decode().strip()
+            return os_type
+        except Exception as e:
+            logger.error(f"Failed to get remote OS type: {e}")
+            raise
+    else:
+        return os.name  # Local system OS type
+
+
+def directory_exists(directory_path):
+    """
+    Check if a directory exists locally or on a remote server.
+
+    Args:
+        directory_path (str): The path to the directory.
+
+    Returns:
+        bool: True if the directory exists, False otherwise.
+    """
+    directory_path = normalize_path(directory_path)
+
+    if is_remote:
+        os_type = get_remote_os()
+        if os_type == "Linux":  # For POSIX systems
+            command = f"test -d {directory_path} && echo exists || echo not_exists"
+        elif os_type == "Windows_NT":  # For Windows systems
+            command = f"if exist {directory_path} (echo exists) else (echo not_exists)"
+        else:
+            raise Exception(f"Unsupported remote OS: {os_type}")
+        # Execute the command
+        stdin, stdout, stderr = remote_connection.exec_command(command)
+        result = stdout.read().decode().strip()
+        return result == "exists"
+    else:
+        # Check locally
+        return os.path.isdir(directory_path)
+
+
 def make_directory(directory_path):
     """
     Create a directory locally or on a remote server.
@@ -475,11 +523,15 @@ def make_directory(directory_path):
     """
     directory_path = normalize_path(directory_path)
 
+    if directory_exists(directory_path):
+        return
+
     if is_remote:
         try:
+            os_type = get_remote_os()
             command = (
                 f"mkdir -p {directory_path}"
-                if os.name == "nt"
+                if os_type == "Linux"
                 else f"powershell -Command \"New-Item -ItemType Directory -Force -Path '{directory_path}'\""
             )
             stdin, stdout, stderr = remote_connection.exec_command(command)
