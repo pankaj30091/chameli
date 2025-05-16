@@ -116,6 +116,25 @@ def cleanup_connection():
         print("Connection to remote server closed.")
 
 
+def ensure_connection():
+    """
+    Ensure the SSH connection is active. Reconnect if the connection is broken.
+    """
+    global remote_connection, is_remote
+
+    if is_remote:
+        try:
+            # Check if the connection is still active
+            transport = remote_connection.get_transport()
+            if transport is None or not transport.is_active():
+                logger.warning("SSH connection is inactive. Reconnecting...")
+                remote_server = get_dynamic_config().get("remote_server", {})
+                initialize_connection(remote_server)
+                logger.info("SSH connection reestablished.")
+        except Exception as e:
+            logger.error(f"Failed to ensure SSH connection: {e}")
+            raise
+  
 def normalize_path(path):
     """
     Normalize file paths based on the operating system.
