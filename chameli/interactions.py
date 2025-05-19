@@ -67,6 +67,7 @@ def initialize_connection(remote_server=None):
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(hostname, port=port, username=username, password=password)
+            ssh.get_transport().set_keepalive(30)
             remote_connection = ssh
             is_remote = True
             print(f"Connected to remote server: {hostname}")
