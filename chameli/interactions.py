@@ -8,7 +8,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate
 from os.path import basename
-
+import traceback
 import psutil
 import pyreadr
 import requests
@@ -134,7 +134,8 @@ def ensure_connection():
         except Exception as e:
             logger.error(f"Failed to ensure SSH connection: {e}")
             raise
-  
+
+
 def normalize_path(path):
     """
     Normalize file paths based on the operating system.
@@ -192,7 +193,7 @@ def readRDS(filename):
             if data:
                 return data[None]
         except Exception as e:
-            logger.error(f"Failed to read RDS file from remote server: {e}")
+            logger.error(f"Failed to read RDS file from remote server: {traceback.print_exc()}")
             logger.error(f"File path: {local_temp_file}")
             if os.path.exists(local_temp_file):
                 logger.error(f"File size: {os.path.getsize(local_temp_file)} bytes")
@@ -213,7 +214,7 @@ def readRDS(filename):
             if data:
                 return data[None]
         except Exception as e:
-            logger.error(f"Failed to read RDS file locally: {e}")
+            logger.error(f"Failed to read RDS file locally: {traceback.print_exc()}")
             logger.error(f"File path: {filename}")
             if os.path.exists(filename):
                 logger.error(f"File size: {os.path.getsize(filename)} bytes")
