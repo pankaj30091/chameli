@@ -3,6 +3,7 @@ import logging
 import math
 import sys
 import traceback
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -111,6 +112,19 @@ def get_option_price(
     price = BlackScholesPrice(S, X, r, sigma, t, OptionType)
     return price
 
+def _parse_combo_symbol(combo_symbol):
+    result = OrderedDict()
+    if "?" not in combo_symbol:
+        result[combo_symbol] = 1
+        return result
+
+    symbols = combo_symbol.split(":")
+
+    for symbol in symbols:
+        name, quantity = symbol.split("?")
+        result[name] = int(quantity)
+
+    return result
 
 def BlackScholesDelta(S: float, X: float, r: float, sigma: float, T: float, OptionType: str) -> float:
     """Calculate Black Scholes Delta
@@ -620,3 +634,75 @@ def find_x_intercepts(price: list[float], value: list[float]) -> list[float]:
             x_intercepts.append(x_intercept)
 
     return x_intercepts
+
+
+def performance_attribution(
+    combo_symbol: str,
+    spot_t0: float,
+    spot_t1: float,
+    ivs_t0: dict,
+    ivs_t1: dict,
+    t0: dt.datetime,
+    t1: dt.datetime,
+    r: float = 0,
+    exchange: str = "NSE",
+) -> dict:
+    """
+    Attribution of price change for any option combo (long/short, any legs).
+    ivs_t0 and ivs_t1 are dicts mapping symbol to IV at t0 and t1.
+    Returns dict with total attribution and per-leg breakdown.
+    """
+    legs = _parse_combo_symbol(combo_symbol)
+    # Helper to get price for a leg
+    def price(symbol, S, sigma, calc_time):
+        return get_option_price(
+            long_symbol=symbol,
+            S=S,
+            sigma=sigma,
+            calc_time=calc_time.strftime("%Y-%m-%d %H:%M:%S"),
+            r=r,
+            exchange=exchange,
+        )
+    # For each leg, calculate all scenario prices
+    results = {}
+    total = {k: 0.0 for k in [
+        "t0", "t1", "dg", "vega", "theta"
+    ]}
+    for symbol, qty in legs.items():
+        iv_t0 = ivs_t0.get(symbol, 0)
+        iv_t1 = ivs_t1.get(symbol, 0)
+        # Prices for this leg
+        p_t0 = price(symbol, spot_t0, iv_t0, t0)
+        p_t1 = price(symbol, spot_t1, iv_t1, t1)
+        p_dg = price(symbol, spot_t1, iv_t0, t0)
+        p_vega = price(symbol, spot_t0, iv_t1, t0)
+        p_theta = price(symbol, spot_t0, iv_t0, t1)
+        results[symbol] = {
+            "qty": qty,
+            "t0": p_t0,
+            "t0_iv": iv_t0,
+            "t1": p_t1,
+            "t1_iv": iv_t1,
+            "dg": p_dg,
+            "vega": p_vega,
+            "theta": p_theta,
+        }
+        for k, v in zip(["t0", "t1", "dg", "vega", "theta"], [p_t0, p_t1, p_dg, p_vega, p_theta]):
+            total[k] += qty * v
+    # Attribution
+    total_change = total["t1"] - total["t0"]
+    delta_gamma_attrib = total["dg"] - total["t0"]
+    vega_attrib = total["vega"] - total["t0"]
+    theta_attrib = total["theta"] - total["t0"]
+    explained = delta_gamma_attrib + vega_attrib + theta_attrib
+    residual = total_change - explained
+    return {
+        "total_t0": total["t0"],
+        "total_t1": total["t1"],
+        "total_change": total_change,
+        "delta_gamma_attrib": delta_gamma_attrib,
+        "vega_attrib": vega_attrib,
+        "theta_attrib": theta_attrib,
+        "residual": residual,
+        "per_leg": results,
+    }
