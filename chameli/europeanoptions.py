@@ -112,6 +112,7 @@ def get_option_price(
     price = BlackScholesPrice(S, X, r, sigma, t, OptionType)
     return price
 
+
 def _parse_combo_symbol(combo_symbol):
     result = OrderedDict()
     if "?" not in combo_symbol:
@@ -125,6 +126,7 @@ def _parse_combo_symbol(combo_symbol):
         result[name] = int(quantity)
 
     return result
+
 
 def BlackScholesDelta(S: float, X: float, r: float, sigma: float, T: float, OptionType: str) -> float:
     """Calculate Black Scholes Delta
@@ -646,63 +648,172 @@ def performance_attribution(
     t1: dt.datetime,
     r: float = 0,
     exchange: str = "NSE",
+    market_close_time: str = "15:30:00",
+    expiry_cutoff_minutes: int = 15,
+    purchase_expiry_vol: float = 0.05,
 ) -> dict:
     """
     Attribution of price change for any option combo (long/short, any legs).
     ivs_t0 and ivs_t1 are dicts mapping symbol to IV at t0 and t1.
     Returns dict with total attribution and per-leg breakdown.
+
+    New Attribution methodology (per user):
+    1. Underlying change: P0 = price at exit time, entry spot, entry vol; P1 = price at exit time, exit spot, entry vol; attribution = P1 - P0
+    2. Vol change: P0 = price at exit time, exit spot, entry vol; P1 = price at exit time, exit spot, exit vol; attribution = P1 - P0
+    3. Time decay: P0 = price at entry time, entry spot, entry vol; P1 = price at exit time, entry spot, entry vol; attribution = P1 - P0
+    Also determines if combo is purchase (net premium paid) or sale (net premium received), and applies special vol handling on expiry as described.
+    Parameters:
+        market_close_time (str): Market close time in HH:MM:SS (default '15:30:00')
+        expiry_cutoff_minutes (int): Minutes before market close for sale vol rule (default 15)
+        purchase_expiry_vol (float): Vol to use for purchase combos at/after market close on expiry (default 0.05)
     """
     legs = _parse_combo_symbol(combo_symbol)
-    # Helper to get price for a leg
+
+    def get_intrinsic_value(symbol, spot_price):
+        try:
+            strike, option_type = parse_option_symbol(symbol)
+            if option_type.upper() in ["CE", "CALL"]:
+                return max(0, spot_price - strike)
+            else:  # PUT
+                return max(0, strike - spot_price)
+        except Exception:
+            return 0
+
+    def get_expiry_datetime(symbol):
+        try:
+            expiry_str = symbol.split("_")[2]
+            return dt.datetime.strptime(expiry_str + f" {market_close_time}", "%Y%m%d %H:%M:%S")
+        except Exception:
+            return None
+
+    def is_on_expiry_and_after_cutoff(symbol, t1):
+        expiry_dt = get_expiry_datetime(symbol)
+        if expiry_dt is None:
+            return False
+        # Calculate cutoff time
+        cutoff_dt = expiry_dt - dt.timedelta(minutes=expiry_cutoff_minutes)
+        return t1.date() == expiry_dt.date() and t1 >= cutoff_dt
+
+    def is_on_expiry_and_after_close(symbol, t1):
+        expiry_dt = get_expiry_datetime(symbol)
+        if expiry_dt is None:
+            return False
+        return t1.date() == expiry_dt.date() and t1 >= expiry_dt
+
     def price(symbol, S, sigma, calc_time):
-        return get_option_price(
-            long_symbol=symbol,
-            S=S,
-            sigma=sigma,
-            calc_time=calc_time.strftime("%Y-%m-%d %H:%M:%S"),
-            r=r,
-            exchange=exchange,
-        )
-    # For each leg, calculate all scenario prices
-    results = {}
-    total = {k: 0.0 for k in [
-        "t0", "t1", "dg", "vega", "theta"
-    ]}
+        sigma = max(sigma, 0.001)
+        try:
+            return get_option_price(
+                long_symbol=symbol,
+                S=S,
+                sigma=sigma,
+                calc_time=calc_time.strftime("%Y-%m-%d %H:%M:%S"),
+                r=r,
+                exchange=exchange,
+            )
+        except Exception:
+            return get_intrinsic_value(symbol, S)
+
+    entry_prices = {}
     for symbol, qty in legs.items():
-        iv_t0 = ivs_t0.get(symbol, 0)
-        iv_t1 = ivs_t1.get(symbol, 0)
-        # Prices for this leg
+        iv_t0 = max(ivs_t0.get(symbol, 0), 0.001)
+        entry_prices[symbol] = price(symbol, spot_t0, iv_t0, t0)
+    net_premium = sum(qty * entry_prices[symbol] for symbol, qty in legs.items())
+    combo_type = "purchase" if net_premium > 0 else "sale"
+
+    results = {}
+    total = {
+        k: 0.0
+        for k in [
+            "t0",
+            "t1",
+            "underlying_scenario_p0",
+            "underlying_scenario_p1",
+            "vol_scenario_p0",
+            "vol_scenario_p1",
+            "timedecay_scenario_p0",
+            "timedecay_scenario_p1",
+        ]
+    }
+
+    for symbol, qty in legs.items():
+        iv_t0 = max(ivs_t0.get(symbol, 0), 0.001)
+        iv_t1 = max(ivs_t1.get(symbol, 0), 0.001)
+        expiry_dt = get_expiry_datetime(symbol)
+        exit_iv = iv_t1
+        if combo_type == "sale" and is_on_expiry_and_after_cutoff(symbol, t1):
+            exit_iv = iv_t0
+        elif combo_type == "purchase" and is_on_expiry_and_after_close(symbol, t1):
+            exit_iv = purchase_expiry_vol
         p_t0 = price(symbol, spot_t0, iv_t0, t0)
-        p_t1 = price(symbol, spot_t1, iv_t1, t1)
-        p_dg = price(symbol, spot_t1, iv_t0, t0)
-        p_vega = price(symbol, spot_t0, iv_t1, t0)
-        p_theta = price(symbol, spot_t0, iv_t0, t1)
+        p_t1 = price(symbol, spot_t1, exit_iv, t1)
+        underlying_scenario_p0 = price(symbol, spot_t0, iv_t0, t1)
+        underlying_scenario_p1 = price(symbol, spot_t1, iv_t0, t1)
+        vol_scenario_p0 = price(symbol, spot_t1, iv_t0, t1)
+        vol_scenario_p1 = price(symbol, spot_t1, exit_iv, t1)
+        timedecay_scenario_p0 = price(symbol, spot_t0, iv_t0, t0)
+        timedecay_scenario_p1 = price(symbol, spot_t0, iv_t0, t1)
         results[symbol] = {
             "qty": qty,
             "t0": p_t0,
             "t0_iv": iv_t0,
             "t1": p_t1,
-            "t1_iv": iv_t1,
-            "dg": p_dg,
-            "vega": p_vega,
-            "theta": p_theta,
+            "t1_iv": exit_iv,
+            "underlying_scenario_p0": underlying_scenario_p0,
+            "underlying_scenario_p1": underlying_scenario_p1,
+            "vol_scenario_p0": vol_scenario_p0,
+            "vol_scenario_p1": vol_scenario_p1,
+            "timedecay_scenario_p0": timedecay_scenario_p0,
+            "timedecay_scenario_p1": timedecay_scenario_p1,
         }
-        for k, v in zip(["t0", "t1", "dg", "vega", "theta"], [p_t0, p_t1, p_dg, p_vega, p_theta]):
-            total[k] += qty * v
-    # Attribution
+        total["t0"] += qty * p_t0
+        total["t1"] += qty * p_t1
+        total["underlying_scenario_p0"] += qty * underlying_scenario_p0
+        total["underlying_scenario_p1"] += qty * underlying_scenario_p1
+        total["vol_scenario_p0"] += qty * vol_scenario_p0
+        total["vol_scenario_p1"] += qty * vol_scenario_p1
+        total["timedecay_scenario_p0"] += qty * timedecay_scenario_p0
+        total["timedecay_scenario_p1"] += qty * timedecay_scenario_p1
+
     total_change = total["t1"] - total["t0"]
-    delta_gamma_attrib = total["dg"] - total["t0"]
-    vega_attrib = total["vega"] - total["t0"]
-    theta_attrib = total["theta"] - total["t0"]
-    explained = delta_gamma_attrib + vega_attrib + theta_attrib
+    underlying_attrib = total["underlying_scenario_p1"] - total["underlying_scenario_p0"]
+    vol_attrib = total["vol_scenario_p1"] - total["vol_scenario_p0"]
+    timedecay_attrib = total["timedecay_scenario_p1"] - total["timedecay_scenario_p0"]
+    explained = underlying_attrib + vol_attrib + timedecay_attrib
     residual = total_change - explained
+
     return {
         "total_t0": total["t0"],
         "total_t1": total["t1"],
         "total_change": total_change,
-        "delta_gamma_attrib": delta_gamma_attrib,
-        "vega_attrib": vega_attrib,
-        "theta_attrib": theta_attrib,
+        "underlying_attrib": underlying_attrib,
+        "vol_attrib": vol_attrib,
+        "timedecay_attrib": timedecay_attrib,
+        "explained": explained,
         "residual": residual,
         "per_leg": results,
+        "combo_type": combo_type,
+        "net_premium": net_premium,
     }
+
+
+# Helper functions you'll need to implement based on your system:
+
+
+def parse_option_symbol(symbol):
+    """
+    Parse option symbol to extract strike and option type.
+    Returns: (strike_price, option_type)
+    Example: "NIFTY24DEC25000CE" -> (25000, "CE")
+    """
+    # Implement based on your symbol format
+    return float(symbol.split("_")[4]), symbol.split("_")[3]
+
+
+def get_expiry_time(symbol):
+    """
+    Get expiry datetime for an option symbol.
+    Returns: datetime object
+    """
+    # Implement based on your system
+    return dt.datetime.strptime(symbol.split("_")[2] + " 15:30:00", "%Y%m%d %H:%M:%S")
