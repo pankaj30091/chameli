@@ -755,9 +755,11 @@ def performance_attribution(
         timedecay_scenario_p1 = price(symbol, spot_t0, iv_t0, t1)
         results[symbol] = {
             "qty": qty,
-            "t0": p_t0,
+            "t0": t0,
+            "p_t0": p_t0,
             "t0_iv": iv_t0,
-            "t1": p_t1,
+            "t1": t1,
+            "p_t1": p_t1,
             "t1_iv": exit_iv,
             "underlying_scenario_p0": underlying_scenario_p0,
             "underlying_scenario_p1": underlying_scenario_p1,
