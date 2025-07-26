@@ -4,7 +4,7 @@ import sys
 from importlib.resources import files
 from logging.handlers import TimedRotatingFileHandler
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 from .config import is_config_loaded, load_config
 
