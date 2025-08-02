@@ -14,12 +14,20 @@ from .config import get_config
 from .dateutils import calc_fractional_business_days, valid_datetime
 from .miscutils import convert_to_dot_dict
 
-logger = logging.getLogger(__name__)
+# Import chameli_logger lazily to avoid circular import
+def get_chameli_logger():
+    """Get chameli_logger instance to avoid circular imports."""
+    from . import chameli_logger
+    return chameli_logger
 
 
 # Exception handler
 def my_handler(typ, value, trace):
-    logger.error("%s %s %s", typ.__name__, value, "".join(traceback.format_tb(trace)))
+    get_chameli_logger().log_error(f"Unhandled exception: {typ.__name__} {value}", None, {
+        "exception_type": typ.__name__,
+        "exception_value": str(value),
+        "traceback": "".join(traceback.format_tb(trace))
+    })
 
 
 def get_dynamic_config():
@@ -355,8 +363,16 @@ def BlackScholesIV(
     """Calculate Black-Scholes Implied Volatility (IV) using Brent's Method (Failsafe)"""
 
     if S <= 0 or X <= 0 or T <= 0 or math.isnan(OptionPrice):
-        logger.error(
-            f"Invalid Inputs: underlying: {S}, strike: {X}, years to maturity: {T}, option type: {OptionType}, option Price: {OptionPrice}"
+        get_chameli_logger().log_error(
+            f"Invalid Inputs: underlying: {S}, strike: {X}, years to maturity: {T}, option type: {OptionType}, option Price: {OptionPrice}",
+            None,
+            {
+                "underlying": S,
+                "strike": X,
+                "years_to_maturity": T,
+                "option_type": OptionType,
+                "option_price": OptionPrice
+            }
         )
         return float("nan")  # Invalid inputs
 

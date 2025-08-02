@@ -9,7 +9,11 @@ import pytz
 
 from .config import get_config
 
-logger = logging.getLogger(__name__)
+# Import chameli_logger lazily to avoid circular import
+def get_chameli_logger():
+    """Get chameli_logger instance to avoid circular imports."""
+    from . import chameli_logger
+    return chameli_logger
 
 pd.options.display.float_format = "{:.2f}".format
 
@@ -55,9 +59,13 @@ def load_timings_by_exchange():
                     "timezone": tz,
                 }
             except ValueError as e:
-                logger.error(f"Invalid time format for exchange {exchange}: {e}")
+                get_chameli_logger().log_error(f"Invalid time format for exchange {exchange}", e, {
+                    "exchange": exchange
+                })
         else:
-            logger.warning(f"Missing open or close time for exchange {exchange}")
+            get_chameli_logger().log_warning(f"Missing open or close time for exchange {exchange}", {
+                "exchange": exchange
+            })
 
     return timings_by_exchange
 
@@ -195,9 +203,14 @@ def business_days_between(start_date, end_date, include_first=False, include_las
         end_date, _ = valid_datetime(end_date)
         is_datetime = isinstance(end_date, dt.datetime)
         end_date = end_date.date() if is_datetime else end_date
-    except Exception:
-        logger.error(
-            f"start_date:{start_date}, end_date:{end_date} are not properly formatted!! exiting business day calculation"
+    except Exception as e:
+        get_chameli_logger().log_error(
+            f"start_date:{start_date}, end_date:{end_date} are not properly formatted!! exiting business day calculation",
+            e,
+            {
+                "start_date": str(start_date),
+                "end_date": str(end_date)
+            }
         )
         return -1000000
     business_days = generate_business_days(start_date, end_date, exchange)
@@ -291,7 +304,10 @@ def calc_fractional_business_days(
         exchange=exchange,
     )
     if biz_days < 0:
-        logger.error(f"End date {end_datetime} cannot be earlier than start date {start_datetime}")
+        get_chameli_logger().log_error(f"End date {end_datetime} cannot be earlier than start date {start_datetime}", None, {
+            "end_datetime": str(end_datetime),
+            "start_datetime": str(start_datetime)
+        })
         return np.nan
 
     # Normalize time stubs as fractions of a business day

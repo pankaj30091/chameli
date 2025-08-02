@@ -5,7 +5,12 @@ import yaml
 
 # Singleton instance to ensure configuration is loaded once
 _config_instance = None
-logger = logging.getLogger(__name__)
+
+# Import chameli_logger lazily to avoid circular import
+def get_chameli_logger():
+    """Get chameli_logger instance to avoid circular imports."""
+    from . import chameli_logger
+    return chameli_logger
 
 
 class Config:
@@ -33,9 +38,13 @@ class Config:
         with open(config_file, "r") as file:
             try:
                 self.configs = yaml.safe_load(file)
-                logger.info(f"Configuration loaded from {config_file}")
+                get_chameli_logger().log_info(f"Configuration loaded from {config_file}", {
+                    "config_file": config_file
+                })
             except Exception as e:
-                logger.error(f"Failed to load configuration: {e}")
+                get_chameli_logger().log_error(f"Failed to load configuration", e, {
+                    "config_file": config_file
+                })
                 raise
 
     def __getitem__(self, key):
@@ -59,9 +68,11 @@ def load_config(default_config_path, force_reload=False):
     global _config_instance
     if _config_instance is None or force_reload:
         _config_instance = Config(default_config_path)
-        logger.warning(f"Config loaded from file {_config_instance.config_path}")
+        get_chameli_logger().log_warning(f"Config loaded from file {_config_instance.config_path}", {
+            "config_path": _config_instance.config_path
+        })
     else:
-        logger.info("Configuration is already loaded. Skipping reload.")
+        get_chameli_logger().log_info("Configuration is already loaded. Skipping reload.")
 
 
 def is_config_loaded():
