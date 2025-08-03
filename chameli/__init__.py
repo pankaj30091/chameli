@@ -66,7 +66,7 @@ def get_default_config_path():
 
 
 class ChameliLogger:
-    """Centralized logger for the chameli package with structured logging capabilities."""
+    """Centralized logger for the Chameli package with structured logging capabilities."""
     
     def __init__(self, name: str = "chameli"):
         self.logger = logging.getLogger(name)
@@ -83,7 +83,7 @@ class ChameliLogger:
         enable_structured_logging: bool = True,
     ):
         """
-        Configure logging for the chameli package with enhanced features.
+        Configure logging for the Chameli package with enhanced features.
         
         Args:
             level: Logging level (e.g., logging.DEBUG, logging.INFO).
@@ -220,10 +220,10 @@ def configure_logging(
     backup_count: int = 7,
     format_string: str = "%(asctime)s:%(name)s:%(filename)s:%(lineno)s - %(funcName)20s() ] %(levelname)s: %(message)s",
     enable_structured_logging: bool = True,
-    configure_root_logger: bool = True,
+    configure_root_logger: bool = False,
 ):
     """
-    Configure logging for specific modules or all modules in the chameli package.
+    Configure logging for specific modules or all modules in the Chameli package.
 
     Args:
         module_names: List of module names to enable logging for. If None, configure logging for all modules.
@@ -291,9 +291,8 @@ def configure_logging(
             logger.setLevel(level)
             # Don't add handlers to avoid duplication
 
-
 # Set default logging level to WARNING and log to console by default
-# Don't configure root logger by default to avoid duplicate logs when used with tradingapi
+# Don't configure root logger by default to avoid duplicate logs
 configure_logging(configure_root_logger=False)
 
 
