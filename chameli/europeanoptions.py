@@ -235,20 +235,23 @@ def calc_greeks(
     days_in_year: int = 252,
     risk_free_rate: float = 0,
     exchange="NSE",
+    cap_theta: bool = True,  # New parameter
 ) -> float:
-    """Helper function to calculate gamma from long_symbol
+    """Helper function to calculate greeks from long_symbol
 
     Args:
         long_symbol (str): long_symbol
         opt_price (float): option price
         underlying (float): underlying price
-        time (dt.datetime, optional): Calculation time. Defaults to dt.datetime.now().
+        calc_time (dt.datetime, optional): Calculation time. Defaults to dt.datetime.now().
+        greeks (list[str], optional): List of greeks to calculate. Defaults to ["delta", "gamma", "theta", "vega"].
         days_in_year (int, optional): Defaults to 252.
         risk_free_rate (float, optional): Defaults to 0.
-        exchage(str, optional): exchange. Defaults to "NSE".
+        exchange (str, optional): exchange. Defaults to "NSE".
+        cap_theta (bool, optional): Whether to cap theta at option price. Defaults to True.
 
     Returns:
-        float: delta of option
+        dict: Dictionary containing calculated greeks
     """
     out = {
         "vol": float("nan"),
@@ -257,6 +260,7 @@ def calc_greeks(
         "theta": float("nan"),
         "vega": float("nan"),
     }
+    
     strike = float(long_symbol.split("_")[4])
     option_type = long_symbol.split("_")[3]
     expiry_str = long_symbol.split("_")[2]
@@ -267,12 +271,22 @@ def calc_greeks(
 
     sigma = BlackScholesIV(underlying, strike, risk_free_rate, t, option_type, opt_price)
     out["vol"] = sigma
+    
     if "delta" in greeks:
         out["delta"] = BlackScholesDelta(underlying, strike, risk_free_rate, sigma, t, option_type)
     if "gamma" in greeks:
         out["gamma"] = BlackScholesGamma(underlying, strike, risk_free_rate, sigma, t)
     if "theta" in greeks:
-        out["theta"] = BlackScholesTheta(underlying, strike, risk_free_rate, sigma, t, option_type, days_in_year)
+        theta = BlackScholesTheta(underlying, strike, risk_free_rate, sigma, t, option_type, days_in_year)
+        # Cap vega at option price if requested
+        if cap_theta:
+            # For long options, theta should be negative and abs(theta) <= option price
+            if theta < 0 and abs(theta) > opt_price:
+                theta = -opt_price
+            # For short options (if any), theta should be positive and <= option price
+            elif theta > 0 and theta > opt_price:
+                theta = opt_price
+        out["theta"] = theta    
     if "vega" in greeks:
         out["vega"] = BlackScholesVega(underlying, strike, risk_free_rate, sigma, t)
 

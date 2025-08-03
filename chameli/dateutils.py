@@ -388,13 +388,13 @@ def advance_by_biz_days(
     """
 
     # Parse the input datetime
-    if isinstance(datetime_, str):
-        parsed_date = pd.to_datetime(datetime_)
-        input_format = "%Y-%m-%d"  # Default format for string input
-    else:
-        parsed_date = datetime_
+    # Parse the input date using valid_datetime
+    parsed_date, input_format = valid_datetime(datetime_)
 
+    # Determine if the input was a datetime or date
     is_datetime = isinstance(parsed_date, dt.datetime)
+
+    # Normalize to date for processing
     current_date = parsed_date.date() if is_datetime else parsed_date
 
     # If days > 0 or < 0, move by business days
