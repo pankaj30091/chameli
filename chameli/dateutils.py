@@ -9,17 +9,25 @@ import pytz
 
 from .config import get_config
 
+
 # Import chameli_logger lazily to avoid circular import
 def get_chameli_logger():
     """Get chameli_logger instance to avoid circular imports."""
     from . import chameli_logger
+
     return chameli_logger
+
 
 pd.options.display.float_format = "{:.2f}".format
 
 
 def get_dynamic_config():
     return get_config()
+
+
+def get_timezone_by_exchange(exchange: str):
+    """Get timezone for the given exchange from the dynamic config."""
+    return get_dynamic_config().get("markets", {}).get(exchange, {}).get("timezone", "Asia/Kolkata")
 
 
 def load_holidays_by_exchange():
@@ -59,13 +67,13 @@ def load_timings_by_exchange():
                     "timezone": tz,
                 }
             except ValueError as e:
-                get_chameli_logger().log_error(f"Invalid time format for exchange {exchange}", e, {
-                    "exchange": exchange
-                })
+                get_chameli_logger().log_error(
+                    f"Invalid time format for exchange {exchange}", e, {"exchange": exchange}
+                )
         else:
-            get_chameli_logger().log_warning(f"Missing open or close time for exchange {exchange}", {
-                "exchange": exchange
-            })
+            get_chameli_logger().log_warning(
+                f"Missing open or close time for exchange {exchange}", {"exchange": exchange}
+            )
 
     return timings_by_exchange
 
@@ -207,10 +215,7 @@ def business_days_between(start_date, end_date, include_first=False, include_las
         get_chameli_logger().log_error(
             f"start_date:{start_date}, end_date:{end_date} are not properly formatted!! exiting business day calculation",
             e,
-            {
-                "start_date": str(start_date),
-                "end_date": str(end_date)
-            }
+            {"start_date": str(start_date), "end_date": str(end_date)},
         )
         return -1000000
     business_days = generate_business_days(start_date, end_date, exchange)
@@ -304,10 +309,11 @@ def calc_fractional_business_days(
         exchange=exchange,
     )
     if biz_days < 0:
-        get_chameli_logger().log_error(f"End date {end_datetime} cannot be earlier than start date {start_datetime}", None, {
-            "end_datetime": str(end_datetime),
-            "start_datetime": str(start_datetime)
-        })
+        get_chameli_logger().log_error(
+            f"End date {end_datetime} cannot be earlier than start date {start_datetime}",
+            None,
+            {"end_datetime": str(end_datetime), "start_datetime": str(start_datetime)},
+        )
         return np.nan
 
     # Normalize time stubs as fractions of a business day
@@ -423,6 +429,81 @@ def advance_by_biz_days(
         return current_date
 
 
+def business_minutes_shift(
+    start_time: Union[str, dt.datetime],
+    minutes: int,
+    exchange: str = "NSE",
+) -> dt.datetime:
+    """
+    Shift a datetime by exactly `minutes` business minutes, skipping non-business periods.
+    Positive `minutes` moves forward, negative moves backward.
+    """
+    # Ensure start_time is a datetime object
+    parsed_date, input_format = valid_datetime(start_time)
+    is_datetime = isinstance(parsed_date, dt.datetime)
+    if not isinstance(parsed_date, dt.datetime):
+        raise ValueError("start_time must be a datetime or string convertible to datetime")
+
+    # Get market open/close times from market_timings and convert to dt.time
+    market_open_str = market_timings.get(exchange, {}).get("open_time", "09:15:00")
+    market_close_str = market_timings.get(exchange, {}).get("close_time", "15:30:00")
+    market_open = dt.datetime.strptime(market_open_str, "%H:%M:%S").time()
+    market_close = dt.datetime.strptime(market_close_str, "%H:%M:%S").time()
+
+    current = parsed_date
+    remaining = abs(minutes)
+    direction = 1 if minutes >= 0 else -1
+
+    while remaining > 0:
+        # Make open_dt and close_dt timezone-aware if current is aware
+        if is_aware(current):
+            tzinfo = current.tzinfo
+            open_dt = dt.datetime.combine(current.date(), market_open).replace(tzinfo=tzinfo)
+            close_dt = dt.datetime.combine(current.date(), market_close).replace(tzinfo=tzinfo)
+        else:
+            open_dt = dt.datetime.combine(current.date(), market_open)
+            close_dt = dt.datetime.combine(current.date(), market_close)
+
+        if direction > 0:
+            # Moving forward
+            if current < open_dt:
+                current = open_dt
+            minutes_left_today = int((close_dt - current).total_seconds() // 60)
+            if remaining <= minutes_left_today:
+                return current + dt.timedelta(minutes=remaining)
+            else:
+                remaining -= minutes_left_today
+                # Move to next business day open
+                next_biz_day = advance_by_biz_days(current.date(), 1, exchange)
+                current = dt.datetime.combine(next_biz_day, market_open)
+        else:
+            # Moving backward
+            if current > close_dt:
+                current = close_dt
+            minutes_since_open = int((current - open_dt).total_seconds() // 60)
+            if remaining <= minutes_since_open:
+                temp = current - dt.timedelta(minutes=remaining)
+                if isinstance(start_time, str):
+                    return temp.strftime(input_format)
+                elif is_datetime:
+                    return temp.replace(tzinfo=parsed_date.tzinfo)
+                else:
+                    return temp
+            else:
+                remaining -= minutes_since_open
+                # Move to previous business day close
+                prev_biz_day = advance_by_biz_days(current.date(), -1, exchange)
+                current = dt.datetime.combine(prev_biz_day, market_close)
+    if isinstance(start_time, str):
+        return current.strftime(input_format)
+    elif is_datetime:
+        return current.replace(tzinfo=parsed_date.tzinfo)
+    else:
+        return current
+
+    return current
+
+
 def get_last_day_of_month(year, month):
     """
     Get the last day of a given month and year.
@@ -437,6 +518,20 @@ def get_last_day_of_month(year, month):
     # Use calendar.monthrange to get the number of days in the month
     last_day = calendar.monthrange(year, month)[1]
     return dt.date(year, month, last_day)
+
+
+def apply_timezone(dt_obj, exchange: str):
+    """
+    Ensure dt_obj is timezone-aware and in the timezone for the given exchange.
+    If dt_obj is naive, localize it. If it's aware but in a different timezone, convert it.
+    """
+    tz = get_timezone_by_exchange(exchange)
+    target_tz = pytz.timezone(tz)
+    if dt_obj.tzinfo is None:
+        return target_tz.localize(dt_obj)
+    elif dt_obj.tzinfo != target_tz:
+        return dt_obj.astimezone(target_tz)
+    return dt_obj
 
 
 def get_expiry(

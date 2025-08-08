@@ -11,23 +11,29 @@ from scipy.optimize import brentq
 from scipy.stats import norm
 
 from .config import get_config
-from .dateutils import calc_fractional_business_days, valid_datetime
+from .dateutils import calc_fractional_business_days, valid_datetime, apply_timezone
 from .miscutils import convert_to_dot_dict
+
 
 # Import chameli_logger lazily to avoid circular import
 def get_chameli_logger():
     """Get chameli_logger instance to avoid circular imports."""
     from . import chameli_logger
+
     return chameli_logger
 
 
 # Exception handler
 def my_handler(typ, value, trace):
-    get_chameli_logger().log_error(f"Unhandled exception: {typ.__name__} {value}", None, {
-        "exception_type": typ.__name__,
-        "exception_value": str(value),
-        "traceback": "".join(traceback.format_tb(trace))
-    })
+    get_chameli_logger().log_error(
+        f"Unhandled exception: {typ.__name__} {value}",
+        None,
+        {
+            "exception_type": typ.__name__,
+            "exception_value": str(value),
+            "traceback": "".join(traceback.format_tb(trace)),
+        },
+    )
 
 
 def get_dynamic_config():
@@ -260,7 +266,7 @@ def calc_greeks(
         "theta": float("nan"),
         "vega": float("nan"),
     }
-    
+
     strike = float(long_symbol.split("_")[4])
     option_type = long_symbol.split("_")[3]
     expiry_str = long_symbol.split("_")[2]
@@ -271,7 +277,7 @@ def calc_greeks(
 
     sigma = BlackScholesIV(underlying, strike, risk_free_rate, t, option_type, opt_price)
     out["vol"] = sigma
-    
+
     if "delta" in greeks:
         out["delta"] = BlackScholesDelta(underlying, strike, risk_free_rate, sigma, t, option_type)
     if "gamma" in greeks:
@@ -286,7 +292,7 @@ def calc_greeks(
             # For short options (if any), theta should be positive and <= option price
             elif theta > 0 and theta > opt_price:
                 theta = opt_price
-        out["theta"] = theta    
+        out["theta"] = theta
     if "vega" in greeks:
         out["vega"] = BlackScholesVega(underlying, strike, risk_free_rate, sigma, t)
 
@@ -385,16 +391,16 @@ def BlackScholesIV(
                 "strike": X,
                 "years_to_maturity": T,
                 "option_type": OptionType,
-                "option_price": OptionPrice
-            }
+                "option_price": OptionPrice,
+            },
         )
         return float("nan")  # Invalid inputs
 
     # Sanity checks: If the option price is clearly incorrect, return NaN
     if OptionType[0] == "C" and S - X > OptionPrice:
-        return float("nan")
+        return 0
     if OptionType[0] == "P" and X - S > OptionPrice:
-        return float("nan")
+        return 0
 
     def black_scholes_price(sigma):
         """Returns Black-Scholes price given sigma (used in root finding)"""
@@ -687,6 +693,8 @@ def performance_attribution(
     ivs_t0 and ivs_t1 are dicts mapping symbol to IV at t0 and t1.
     Returns dict with total attribution and per-leg breakdown.
 
+
+
     New Attribution methodology (per user):
     1. Underlying change: P0 = price at exit time, entry spot, entry vol; P1 = price at exit time, exit spot, entry vol; attribution = P1 - P0
     2. Vol change: P0 = price at exit time, exit spot, entry vol; P1 = price at exit time, exit spot, exit vol; attribution = P1 - P0
@@ -697,6 +705,8 @@ def performance_attribution(
         expiry_cutoff_minutes (int): Minutes before market close for sale vol rule (default 15)
         purchase_expiry_vol (float): Vol to use for purchase combos at/after market close on expiry (default 0.05)
     """
+    t0 = apply_timezone(t0, exchange)
+    t1 = apply_timezone(t1, exchange)
     legs = _parse_combo_symbol(combo_symbol)
 
     def get_intrinsic_value(symbol, spot_price):
@@ -716,10 +726,11 @@ def performance_attribution(
         except Exception:
             return None
 
-    def is_on_expiry_and_after_cutoff(symbol, t1):
+    def is_on_expiry_and_after_cutoff(symbol, t1, exchange):
         expiry_dt = get_expiry_datetime(symbol)
         if expiry_dt is None:
             return False
+        expiry_dt = apply_timezone(expiry_dt, exchange)
         # Calculate cutoff time
         cutoff_dt = expiry_dt - dt.timedelta(minutes=expiry_cutoff_minutes)
         return t1.date() == expiry_dt.date() and t1 >= cutoff_dt
@@ -765,15 +776,14 @@ def performance_attribution(
             "timedecay_scenario_p1",
         ]
     }
-
     for symbol, qty in legs.items():
         iv_t0 = max(ivs_t0.get(symbol, 0), 0.001)
         iv_t1 = max(ivs_t1.get(symbol, 0), 0.001)
         expiry_dt = get_expiry_datetime(symbol)
         exit_iv = iv_t1
-        if combo_type == "sale" and is_on_expiry_and_after_cutoff(symbol, t1):
+        if combo_type == "sale" and is_on_expiry_and_after_cutoff(symbol, t1, exchange):
             exit_iv = iv_t0
-        elif combo_type == "purchase" and is_on_expiry_and_after_close(symbol, t1):
+        elif combo_type == "purchase" and is_on_expiry_and_after_close(symbol, t1, exchange):
             exit_iv = purchase_expiry_vol
         p_t0 = price(symbol, spot_t0, iv_t0, t0)
         p_t1 = price(symbol, spot_t1, exit_iv, t1)
@@ -785,12 +795,11 @@ def performance_attribution(
         timedecay_scenario_p1 = price(symbol, spot_t0, iv_t0, t1)
         results[symbol] = {
             "qty": qty,
-            "t0": t0,
             "p_t0": p_t0,
-            "t0_iv": iv_t0,
+            "iv_t0": iv_t0,
             "t1": t1,
             "p_t1": p_t1,
-            "t1_iv": exit_iv,
+            "iv_t1": exit_iv,
             "underlying_scenario_p0": underlying_scenario_p0,
             "underlying_scenario_p1": underlying_scenario_p1,
             "vol_scenario_p0": vol_scenario_p0,
@@ -815,8 +824,13 @@ def performance_attribution(
     residual = total_change - explained
 
     return {
-        "total_t0": total["t0"],
-        "total_t1": total["t1"],
+        "symbol": combo_symbol,
+        "t0": t0,
+        "t1": t1,
+        "spot_t0": spot_t0,
+        "spot_t1": spot_t1,
+        "value_t0": total["t0"],
+        "value_t1": total["t1"],
         "total_change": total_change,
         "underlying_attrib": underlying_attrib,
         "vol_attrib": vol_attrib,
