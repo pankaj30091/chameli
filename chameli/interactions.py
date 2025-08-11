@@ -99,7 +99,7 @@ def get_os():
             return "Linux" if os_type == "Linux" else "NT"
         except Exception as e:
             get_chameli_logger().log_error(
-                f"Failed to get remote OS type", e, {"remote_connection": "active" if is_remote else "inactive"}
+                "Failed to get remote OS type", e, {"remote_connection": "active" if is_remote else "inactive"}
             )
             raise
     else:
@@ -142,7 +142,7 @@ def ensure_connection():
                 initialize_connection(remote_server)
                 get_chameli_logger().log_info("SSH connection reestablished.", {"connection_status": "reconnected"})
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to ensure SSH connection", e, {"connection_status": "failed"})
+            get_chameli_logger().log_error("Failed to ensure SSH connection", e, {"connection_status": "failed"})
             raise
 
 
@@ -209,7 +209,7 @@ def readRDS(filename):
                 return data[None]
         except Exception as e:
             get_chameli_logger().log_error(
-                f"Failed to read RDS file from remote server",
+                "Failed to read RDS file from remote server",
                 e,
                 {"file_path": local_temp_file, "operation": "read_remote"},
             )
@@ -242,7 +242,7 @@ def readRDS(filename):
                 return data[None]
         except Exception as e:
             get_chameli_logger().log_error(
-                f"Failed to read RDS file locally", e, {"file_path": filename, "operation": "read_local"}
+                "Failed to read RDS file locally", e, {"file_path": filename, "operation": "read_local"}
             )
             if os.path.exists(filename):
                 get_chameli_logger().log_error(
@@ -286,7 +286,7 @@ def saveRDS(pd_file, path):
             )
         except Exception as e:
             get_chameli_logger().log_error(
-                f"Failed to save RDS file to remote server", e, {"file_path": path, "operation": "save_remote"}
+                "Failed to save RDS file to remote server", e, {"file_path": path, "operation": "save_remote"}
             )
             raise
         finally:
@@ -304,7 +304,7 @@ def saveRDS(pd_file, path):
             )
         except Exception as e:
             get_chameli_logger().log_error(
-                f"Failed to save RDS file locally", e, {"file_path": path, "operation": "save_local"}
+                "Failed to save RDS file locally", e, {"file_path": path, "operation": "save_local"}
             )
             raise
 
