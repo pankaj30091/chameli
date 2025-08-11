@@ -783,7 +783,7 @@ def performance_attribution(
         exit_iv = iv_t1
         if combo_type == "sale" and is_on_expiry_and_after_cutoff(symbol, t1, exchange):
             exit_iv = iv_t0
-        elif combo_type == "purchase" and is_on_expiry_and_after_close(symbol, t1, exchange):
+        elif combo_type == "purchase" and is_on_expiry_and_after_close(symbol, t1):
             exit_iv = purchase_expiry_vol
         p_t0 = price(symbol, spot_t0, iv_t0, t0)
         p_t1 = price(symbol, spot_t1, exit_iv, t1)
