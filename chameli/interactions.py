@@ -42,6 +42,7 @@ def get_dynamic_config():
 def get_chameli_logger():
     """Get chameli_logger instance to avoid circular imports."""
     from . import chameli_logger
+
     return chameli_logger
 
 
@@ -97,9 +98,9 @@ def get_os():
             os_type = stdout.read().decode().strip()
             return "Linux" if os_type == "Linux" else "NT"
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to get remote OS type", e, {
-                "remote_connection": "active" if is_remote else "inactive"
-            })
+            get_chameli_logger().log_error(
+                f"Failed to get remote OS type", e, {"remote_connection": "active" if is_remote else "inactive"}
+            )
             raise
     else:
         return "Linux" if os.name == "posix" else "NT"
@@ -134,18 +135,14 @@ def ensure_connection():
             # Check if the connection is still active
             transport = remote_connection.get_transport()
             if transport is None or not transport.is_active():
-                get_chameli_logger().log_warning("SSH connection is inactive. Reconnecting...", {
-                    "connection_status": "inactive"
-                })
+                get_chameli_logger().log_warning(
+                    "SSH connection is inactive. Reconnecting...", {"connection_status": "inactive"}
+                )
                 remote_server = get_dynamic_config().get("remote_server", {})
                 initialize_connection(remote_server)
-                get_chameli_logger().log_info("SSH connection reestablished.", {
-                    "connection_status": "reconnected"
-                })
+                get_chameli_logger().log_info("SSH connection reestablished.", {"connection_status": "reconnected"})
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to ensure SSH connection", e, {
-                "connection_status": "failed"
-            })
+            get_chameli_logger().log_error(f"Failed to ensure SSH connection", e, {"connection_status": "failed"})
             raise
 
 
@@ -197,30 +194,31 @@ def readRDS(filename):
                 scp.get(filename, local_temp_file)
 
             # Log file details
-            get_chameli_logger().log_debug(f"Downloaded RDS file to: {local_temp_file}", {
-                "file_path": local_temp_file,
-                "operation": "download"
-            })
+            get_chameli_logger().log_debug(
+                f"Downloaded RDS file to: {local_temp_file}", {"file_path": local_temp_file, "operation": "download"}
+            )
             if os.path.exists(local_temp_file):
-                get_chameli_logger().log_debug(f"File size: {os.path.getsize(local_temp_file)} bytes", {
-                    "file_path": local_temp_file,
-                    "file_size": os.path.getsize(local_temp_file)
-                })
+                get_chameli_logger().log_debug(
+                    f"File size: {os.path.getsize(local_temp_file)} bytes",
+                    {"file_path": local_temp_file, "file_size": os.path.getsize(local_temp_file)},
+                )
 
             # Read the RDS file locally
             data = pyreadr.read_r(local_temp_file)
             if data:
                 return data[None]
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to read RDS file from remote server", e, {
-                "file_path": local_temp_file,
-                "operation": "read_remote"
-            })
+            get_chameli_logger().log_error(
+                f"Failed to read RDS file from remote server",
+                e,
+                {"file_path": local_temp_file, "operation": "read_remote"},
+            )
             if os.path.exists(local_temp_file):
-                get_chameli_logger().log_error(f"File size: {os.path.getsize(local_temp_file)} bytes", e, {
-                    "file_path": local_temp_file,
-                    "file_size": os.path.getsize(local_temp_file)
-                })
+                get_chameli_logger().log_error(
+                    f"File size: {os.path.getsize(local_temp_file)} bytes",
+                    e,
+                    {"file_path": local_temp_file, "file_size": os.path.getsize(local_temp_file)},
+                )
             raise
         finally:
             # Clean up the temporary file
@@ -229,30 +227,29 @@ def readRDS(filename):
     else:
         try:
             # Log file details
-            get_chameli_logger().log_debug(f"Reading RDS file locally: {filename}", {
-                "file_path": filename,
-                "operation": "read_local"
-            })
+            get_chameli_logger().log_debug(
+                f"Reading RDS file locally: {filename}", {"file_path": filename, "operation": "read_local"}
+            )
             if os.path.exists(filename):
-                get_chameli_logger().log_debug(f"File size: {os.path.getsize(filename)} bytes", {
-                    "file_path": filename,
-                    "file_size": os.path.getsize(filename)
-                })
+                get_chameli_logger().log_debug(
+                    f"File size: {os.path.getsize(filename)} bytes",
+                    {"file_path": filename, "file_size": os.path.getsize(filename)},
+                )
 
             # Read the RDS file locally
             data = pyreadr.read_r(filename)
             if data:
                 return data[None]
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to read RDS file locally", e, {
-                "file_path": filename,
-                "operation": "read_local"
-            })
+            get_chameli_logger().log_error(
+                f"Failed to read RDS file locally", e, {"file_path": filename, "operation": "read_local"}
+            )
             if os.path.exists(filename):
-                get_chameli_logger().log_error(f"File size: {os.path.getsize(filename)} bytes", e, {
-                    "file_path": filename,
-                    "file_size": os.path.getsize(filename)
-                })
+                get_chameli_logger().log_error(
+                    f"File size: {os.path.getsize(filename)} bytes",
+                    e,
+                    {"file_path": filename, "file_size": os.path.getsize(filename)},
+                )
             raise
 
 
@@ -284,15 +281,13 @@ def saveRDS(pd_file, path):
             with SCPClient(remote_connection.get_transport()) as scp:
                 scp.put(local_temp_file, path)  # Upload the file to the remote server
 
-            get_chameli_logger().log_info(f"RDS file successfully saved to remote server: {path}", {
-                "file_path": path,
-                "operation": "save_remote"
-            })
+            get_chameli_logger().log_info(
+                f"RDS file successfully saved to remote server: {path}", {"file_path": path, "operation": "save_remote"}
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to save RDS file to remote server", e, {
-                "file_path": path,
-                "operation": "save_remote"
-            })
+            get_chameli_logger().log_error(
+                f"Failed to save RDS file to remote server", e, {"file_path": path, "operation": "save_remote"}
+            )
             raise
         finally:
             # Clean up the temporary file
@@ -304,15 +299,13 @@ def saveRDS(pd_file, path):
             with localconverter(ro.default_converter + pandas2ri.converter):
                 r_from_pd_df = ro.conversion.py2rpy(pd_file)
             ro.r["saveRDS"](r_from_pd_df, path, version=2)
-            get_chameli_logger().log_info(f"RDS file successfully saved locally: {path}", {
-                "file_path": path,
-                "operation": "save_local"
-            })
+            get_chameli_logger().log_info(
+                f"RDS file successfully saved locally: {path}", {"file_path": path, "operation": "save_local"}
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to save RDS file locally", e, {
-                "file_path": path,
-                "operation": "save_local"
-            })
+            get_chameli_logger().log_error(
+                f"Failed to save RDS file locally", e, {"file_path": path, "operation": "save_local"}
+            )
             raise
 
 
@@ -339,9 +332,14 @@ def save_file(dest_file, content):
             with SCPClient(remote_connection.get_transport()) as scp:
                 scp.put(local_temp_file, dest_file)  # Upload the file to the remote server
 
-            get_chameli_logger().log_info(f"File successfully saved to remote server: {dest_file}", {"file_path": "{dest_file}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"File successfully saved to remote server: {dest_file}",
+                {"file_path": "{dest_file}", "operation": "file_operation"},
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to save file to remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to save file to remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
         finally:
             # Clean up the temporary file
@@ -352,9 +350,14 @@ def save_file(dest_file, content):
             # Save the file locally
             with open(dest_file, "wb") as file:
                 file.write(content)
-            get_chameli_logger().log_info(f"File successfully saved locally: {dest_file}", {"file_path": "{dest_file}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"File successfully saved locally: {dest_file}",
+                {"file_path": "{dest_file}", "operation": "file_operation"},
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to save file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to save file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
 
 
@@ -381,15 +384,23 @@ def file_exists_and_valid(file_path, min_size=1000):
                 if file_attr.st_size >= min_size:
                     return True
                 else:
-                    get_chameli_logger().log_info(f"File exists on remote server but does not meet size requirement: {file_path}", {"file_path": "{file_path}", "operation": "file_operation"})
+                    get_chameli_logger().log_info(
+                        f"File exists on remote server but does not meet size requirement: {file_path}",
+                        {"file_path": "{file_path}", "operation": "file_operation"},
+                    )
                     return False
             except FileNotFoundError:
-                get_chameli_logger().log_info(f"File not found on remote server: {file_path}", {"file_path": "{file_path}", "operation": "file_operation"})
+                get_chameli_logger().log_info(
+                    f"File not found on remote server: {file_path}",
+                    {"file_path": "{file_path}", "operation": "file_operation"},
+                )
                 return False
             finally:
                 sftp.close()
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to check file on remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to check file on remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
     else:
         # Check file existence and size locally
@@ -397,10 +408,15 @@ def file_exists_and_valid(file_path, min_size=1000):
             if os.path.exists(file_path) and os.path.getsize(file_path) >= min_size:
                 return True
             else:
-                get_chameli_logger().log_info(f"File exists locally but does not meet size requirement: {file_path}", {"file_path": "{file_path}", "operation": "file_operation"})
+                get_chameli_logger().log_info(
+                    f"File exists locally but does not meet size requirement: {file_path}",
+                    {"file_path": "{file_path}", "operation": "file_operation"},
+                )
                 return False
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to check file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to check file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
 
 
@@ -426,10 +442,17 @@ def read_csv_in_pandas_out(file_path, **kwargs):
                 scp.get(file_path, local_temp_file)
 
             df = pd.read_csv(local_temp_file, **kwargs)
-            get_chameli_logger().log_info(f"CSV file successfully read from remote server: {file_path}", {"file_path": "{file_path}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"CSV file successfully read from remote server: {file_path}",
+                {"file_path": "{file_path}", "operation": "file_operation"},
+            )
             return df
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to read CSV file from remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to read CSV file from remote server: {e}",
+                None,
+                {"file_path": "{e}", "operation": "file_operation"},
+            )
             raise
         finally:
             if os.path.exists(local_temp_file):
@@ -437,10 +460,15 @@ def read_csv_in_pandas_out(file_path, **kwargs):
     else:
         try:
             df = pd.read_csv(file_path, **kwargs)
-            get_chameli_logger().log_info(f"CSV file successfully read locally: {file_path}", {"file_path": "{file_path}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"CSV file successfully read locally: {file_path}",
+                {"file_path": "{file_path}", "operation": "file_operation"},
+            )
             return df
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to read CSV file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to read CSV file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
 
 
@@ -464,9 +492,16 @@ def save_pandas_in_csv_out(df, dest_file, **kwargs):
             with SCPClient(remote_connection.get_transport()) as scp:
                 scp.put(local_temp_file, dest_file)
 
-            get_chameli_logger().log_info(f"CSV file successfully saved to remote server: {dest_file}", {"file_path": "{dest_file}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"CSV file successfully saved to remote server: {dest_file}",
+                {"file_path": "{dest_file}", "operation": "file_operation"},
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to save CSV file to remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to save CSV file to remote server: {e}",
+                None,
+                {"file_path": "{e}", "operation": "file_operation"},
+            )
             raise
         finally:
             if os.path.exists(local_temp_file):
@@ -474,9 +509,14 @@ def save_pandas_in_csv_out(df, dest_file, **kwargs):
     else:
         try:
             df.to_csv(dest_file, **kwargs)
-            get_chameli_logger().log_info(f"CSV file successfully saved locally: {dest_file}", {"file_path": "{dest_file}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"CSV file successfully saved locally: {dest_file}",
+                {"file_path": "{dest_file}", "operation": "file_operation"},
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to save CSV file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to save CSV file locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
 
 
@@ -601,16 +641,28 @@ def make_directory(directory_path):
             if exit_status != 0:
                 error_message = stderr.read().decode().strip()
                 raise Exception(f"Failed to create directory on remote server: {error_message}")
-            get_chameli_logger().log_info(f"Directory successfully created on remote server: {directory_path}", {"file_path": "{directory_path}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"Directory successfully created on remote server: {directory_path}",
+                {"file_path": "{directory_path}", "operation": "file_operation"},
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to create directory on remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to create directory on remote server: {e}",
+                None,
+                {"file_path": "{e}", "operation": "file_operation"},
+            )
             raise
     else:
         try:
             os.makedirs(directory_path, exist_ok=True)
-            get_chameli_logger().log_info(f"Directory successfully created locally: {directory_path}", {"file_path": "{directory_path}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"Directory successfully created locally: {directory_path}",
+                {"file_path": "{directory_path}", "operation": "file_operation"},
+            )
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to create directory locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to create directory locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
 
 
@@ -631,18 +683,30 @@ def list_directory(directory_path):
             sftp = remote_connection.open_sftp()
             contents = sftp.listdir(directory_path)
             sftp.close()
-            get_chameli_logger().log_info(f"Directory contents successfully listed on remote server: {directory_path}", {"file_path": "{directory_path}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"Directory contents successfully listed on remote server: {directory_path}",
+                {"file_path": "{directory_path}", "operation": "file_operation"},
+            )
             return contents
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to list directory on remote server: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to list directory on remote server: {e}",
+                None,
+                {"file_path": "{e}", "operation": "file_operation"},
+            )
             raise
     else:
         try:
             contents = os.listdir(directory_path)
-            get_chameli_logger().log_info(f"Directory contents successfully listed locally: {directory_path}", {"file_path": "{directory_path}", "operation": "file_operation"})
+            get_chameli_logger().log_info(
+                f"Directory contents successfully listed locally: {directory_path}",
+                {"file_path": "{directory_path}", "operation": "file_operation"},
+            )
             return contents
         except Exception as e:
-            get_chameli_logger().log_error(f"Failed to list directory locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to list directory locally: {e}", None, {"file_path": "{e}", "operation": "file_operation"}
+            )
             raise
 
 
@@ -760,6 +824,9 @@ def get_session_or_driver(
             options.set_preference("media.peerconnection.enabled", False)  # Disable WebRTC to prevent IP leaks
         if proxy_user is not None and proxy_pass is not None:
             # Add proxy authentication
+            # PAC_FILE_PATH = os.path.abspath("/home/psharma/onedrive/.tradingapi/proxy_auth.pac")
+            # options.set_preference("network.proxy.type", 2)  # PAC file
+            # options.set_preference("network.proxy.autoconfig_url", f"file:///{PAC_FILE_PATH.replace(os.sep, '/')}")
             options.set_preference("network.proxy.username", proxy_user)
             options.set_preference("network.proxy.password", proxy_pass)
         if headless:
@@ -855,10 +922,18 @@ def get_session_or_driver(
                 data = response.json()
                 return data.get("countryCode")  # Returns the country code (e.g., "IN")
             else:
-                get_chameli_logger().log_error(f"Failed to fetch country for IP {ip_address}. Status code: {response.status_code}", None, {"file_path": "{response.status_code}", "operation": "file_operation"})
+                get_chameli_logger().log_error(
+                    f"Failed to fetch country for IP {ip_address}. Status code: {response.status_code}",
+                    None,
+                    {"file_path": "{response.status_code}", "operation": "file_operation"},
+                )
                 return None
         except Exception as e:
-            get_chameli_logger().log_error(f"Error while fetching country for IP {ip_address}: {e}", None, {"file_path": "{e}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Error while fetching country for IP {ip_address}: {e}",
+                None,
+                {"file_path": "{e}", "operation": "file_operation"},
+            )
             return None
 
     def get_random_webshare_proxy(country_code=None, mode="direct"):
@@ -879,7 +954,11 @@ def get_session_or_driver(
                     if country_code is None or actual_country == country_code:
                         proxies.append(proxy_address)
         else:
-            get_chameli_logger().log_error(f"Failed to retrieve proxies. Status code: {response.status_code}", None, {"file_path": "{response.status_code}", "operation": "file_operation"})
+            get_chameli_logger().log_error(
+                f"Failed to retrieve proxies. Status code: {response.status_code}",
+                None,
+                {"file_path": "{response.status_code}", "operation": "file_operation"},
+            )
         return proxies
 
     def get_free_proxy(
@@ -921,7 +1000,9 @@ def get_session_or_driver(
                 return proxies
 
             except Exception as e:
-                get_chameli_logger().log_info(f"Error fetching proxies: {e}", {"file_path": "{e}", "operation": "file_operation"})
+                get_chameli_logger().log_info(
+                    f"Error fetching proxies: {e}", {"file_path": "{e}", "operation": "file_operation"}
+                )
                 return []
 
             finally:
