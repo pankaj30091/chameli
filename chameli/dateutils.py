@@ -535,7 +535,7 @@ def apply_timezone(dt_obj, exchange: str):
 
 
 def get_expiry(
-    date: Union[str, dt.datetime], weekly=0, day_of_week: int = 4, exchange="NSE"
+    date: Union[str, dt.datetime, dt.date], weekly=0, day_of_week: int = 4, exchange="NSE"
 ) -> Union[str, dt.datetime, dt.date]:
     """
     Calculate the last working expiry date for a given input date.
@@ -598,18 +598,41 @@ def get_expiry(
     date_mod = parsed_date.date() if is_datetime else parsed_date
 
     if weekly > 0:
-        # Weekly expiry: Check if the input date is already a valid expiry
-        if date_mod.weekday() == day_of_week - 1 and date_mod not in holidays.get(exchange):
+        # Weekly expiry: Find the Nth weekly expiry from the input date
+        def find_next_valid_expiry(start_date):
+            """Find the next valid expiry date starting from start_date (inclusive)."""
+            current = start_date
+            while True:
+                # Find the next occurrence of the target weekday
+                while current.weekday() != day_of_week - 1:
+                    current += dt.timedelta(days=1)
+                # Adjust backward for holidays and weekends
+                adjusted = adjust_to_previous_working_day(current)
+                # If adjustment moved backward, continue from the next day
+                if adjusted < current:
+                    current = adjusted + dt.timedelta(days=1)
+                    continue
+                return adjusted
+        
+        # Check if today is a valid expiry day
+        is_today_expiry = (date_mod.weekday() == day_of_week - 1 and 
+                          date_mod not in holidays.get(exchange))
+        
+        if is_today_expiry and weekly == 1:
+            # Today is an expiry day and we want the first week, so return today
             expiry = date_mod
         else:
-            # Find the next occurrence of the target weekday from the input date
-            expiry = date_mod
-            while True:
-                expiry += dt.timedelta(days=1)
-                if expiry.weekday() == day_of_week - 1:
-                    break
-            # Adjust backward for holidays and weekends
-            expiry = adjust_to_previous_working_day(expiry)
+            # Find the first expiry
+            # If today is an expiry day but weekly > 1, start from tomorrow to skip today
+            start_date = date_mod + dt.timedelta(days=1) if is_today_expiry else date_mod
+            expiry = find_next_valid_expiry(start_date)
+            
+            # Calculate how many more expiries to find
+            # If today is an expiry day, we've already skipped weekly=1, so find (weekly-2) more
+            # If today is not an expiry day, find (weekly-1) more after the first one
+            additional_expiries = (weekly - 2) if is_today_expiry else (weekly - 1)
+            for _ in range(additional_expiries):
+                expiry = find_next_valid_expiry(expiry + dt.timedelta(days=1))
 
     else:
         # Monthly expiry: Always calculate the last valid weekday of the month
