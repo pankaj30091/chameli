@@ -48,6 +48,7 @@ dependencies = [
     "psutil==7.0.0",
     "scp==0.15.0",
     "paramiko==3.5.1",
+    "mitmproxy==12.2.1",
 ]
 
 [project.urls]
