@@ -29,7 +29,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import threading
 import socket
 import base64
-from urllib.parse import urlparse
+import time
+from urllib.parse import urlparse, quote
 from mitmproxy import options
 from mitmproxy.tools.dump import DumpMaster
 from mitmproxy import http
@@ -778,20 +779,65 @@ class MitmProxyServer:
         self.master = None
         self.server_thread = None
         self.running = False
+        self.needs_new_upstream = False  # Flag to indicate upstream proxy needs to be changed
 
+    def _find_available_port(self, start_port=8080, max_attempts=10):
+        """Find an available port starting from start_port"""
+        import socket
+        for offset in range(max_attempts):
+            port = start_port + offset
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            try:
+                result = sock.connect_ex(("127.0.0.1", port))
+                sock.close()
+                if result != 0:  # Port is not in use
+                    return port
+            except Exception:
+                sock.close()
+                pass
+        return None  # No available port found
+    
     def start(self):
         """Start the mitmproxy server in a background thread"""
         if self.running:
             return
 
         try:
+            # Try to find an available port if default port is busy
+            actual_port = self.local_port
+            if actual_port == 8080:  # Only check for default port
+                import socket
+                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                test_sock.settimeout(0.1)
+                if test_sock.connect_ex(("127.0.0.1", 8080)) == 0:
+                    # Port 8080 is in use, find alternative
+                    test_sock.close()
+                    alternative_port = self._find_available_port(8080, 10)
+                    if alternative_port:
+                        get_chameli_logger().log_warning(
+                            f"Port 8080 is in use, using alternative port {alternative_port}",
+                            {"original_port": 8080, "alternative_port": alternative_port, "function": "MitmProxyServer.start"}
+                        )
+                        actual_port = alternative_port
+                        self.local_port = alternative_port  # Update instance port
+                    else:
+                        test_sock.close()
+                        raise Exception("No available ports found (tried 8080-8089)")
+                else:
+                    test_sock.close()
+            
             # Configure mitmproxy options
-            opts = options.Options(listen_port=self.local_port, listen_host="127.0.0.1")
+            opts = options.Options(listen_port=actual_port, listen_host="127.0.0.1")
             
             # Set upstream proxy (without auth in URL - handle auth via addon)
             upstream_host, upstream_port = self.upstream_proxy.split(':')
             upstream_url = f"http://{upstream_host}:{upstream_port}"
             opts.mode = [f"upstream:{upstream_url}"]
+            
+            # Set upstream proxy authentication via options (if supported)
+            # Note: mitmproxy doesn't directly support upstream_auth in options,
+            # so we handle it via Proxy-Authorization header in the addon
             
             # Create a custom addon to handle upstream proxy and logging
             upstream_proxy = self.upstream_proxy
@@ -803,18 +849,31 @@ class MitmProxyServer:
                     self.upstream_proxy = upstream_proxy
                     self.proxy_user = proxy_user
                     self.proxy_pass = proxy_pass
+                    # Pre-compute auth header
+                    auth_string = f"{self.proxy_user}:{self.proxy_pass}"
+                    self.auth_header = base64.b64encode(auth_string.encode()).decode()
                 
-                def request(self, flow: http.HTTPFlow) -> None:
-                    # Add Proxy-Authorization header for all requests going through upstream proxy
-                    # This is needed for CONNECT requests (HTTPS tunneling) and regular HTTP requests
+                def http_connect_upstream(self, flow: http.HTTPFlow) -> None:
+                    """Handle upstream CONNECT requests - add Proxy-Authorization header"""
+                    # This hook is called when mitmproxy sends a CONNECT request to the upstream proxy
                     auth_string = f"{self.proxy_user}:{self.proxy_pass}"
                     auth_header = base64.b64encode(auth_string.encode()).decode()
                     flow.request.headers["Proxy-Authorization"] = f"Basic {auth_header}"
+                    get_chameli_logger().log_info(
+                        f"Proxy CONNECT upstream: {flow.request.pretty_url} (auth header set)",
+                        {"method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.http_connect_upstream"}
+                    )
+
+                def request(self, flow: http.HTTPFlow) -> None:
+                    # Add Proxy-Authorization header for regular HTTP requests going through upstream proxy
+                    # (CONNECT requests are handled in http_connect_upstream)
+                    if flow.request.method != "CONNECT":
+                        flow.request.headers["Proxy-Authorization"] = f"Basic {self.auth_header}"
                     
-                    # Only log CONNECT requests (HTTPS tunneling) and non-2xx responses
+                    # Log CONNECT requests from client
                     if flow.request.method == "CONNECT":
                         get_chameli_logger().log_info(
-                            f"Proxy CONNECT: {flow.request.pretty_url}",
+                            f"Proxy CONNECT from client: {flow.request.pretty_url}",
                             {"method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.request"}
                         )
                 
@@ -825,14 +884,31 @@ class MitmProxyServer:
                             f"Proxy error response: {flow.response.status_code} for {flow.request.pretty_url}",
                             {"status_code": flow.response.status_code, "method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.response"}
                         )
+                
+                def error(self, flow: http.HTTPFlow) -> None:
+                    """Handle connection-level errors (like CONNECT failures)"""
+                    if flow.error:
+                        error_msg = flow.error.msg if hasattr(flow.error, 'msg') else str(flow.error)
+                        # Log connection errors as warnings
+                        get_chameli_logger().log_warning(
+                            f"Proxy connection error: {error_msg}",
+                            {
+                                "error_msg": error_msg,
+                                "url": flow.request.pretty_url if flow.request else "N/A",
+                                "upstream_proxy": self.upstream_proxy,
+                                "function": "MitmProxyServer.ProxyAddon.error"
+                            }
+                        )
             
             # Start server in background thread with its own event loop
+            # Capture actual_port in closure
+            captured_port = actual_port
             def run_proxy():
                 import asyncio
                 try:
                     get_chameli_logger().log_info(
                         f"Starting mitmproxy in thread",
-                        {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
+                        {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                     )
                     # Create a new event loop for this thread
                     loop = asyncio.new_event_loop()
@@ -842,20 +918,20 @@ class MitmProxyServer:
                     async def create_master():
                         get_chameli_logger().log_info(
                             f"Creating DumpMaster",
-                            {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
+                            {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
                         )
                         self.master = DumpMaster(opts)
                         self.master.addons.add(ProxyAddon(upstream_proxy, proxy_user, proxy_pass))
                         get_chameli_logger().log_info(
                             f"DumpMaster created",
-                            {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
+                            {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
                         )
                         return self.master
                     
                     # Create master within event loop context
                     get_chameli_logger().log_info(
                         f"Starting event loop for mitmproxy",
-                        {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
+                        {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                     )
                     try:
                         # Create master in async context
@@ -864,7 +940,7 @@ class MitmProxyServer:
                         # We need to run it in a way that keeps the event loop alive
                         get_chameli_logger().log_info(
                             f"Calling master.run()",
-                            {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
+                            {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                         )
                         # Run the master - this is blocking and should start the server
                         # The event loop is already set for this thread
@@ -873,15 +949,25 @@ class MitmProxyServer:
                         get_chameli_logger().log_error(
                             f"Error in mitmproxy: {str(e)}",
                             e,
-                            {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
+                            {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                         )
                         raise
                 except Exception as e:
-                    get_chameli_logger().log_error(
-                        f"mitmproxy server error: {str(e)}",
-                        e,
-                        {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
-                    )
+                    error_str = str(e)
+                    # Check if it's a port binding error
+                    if "address already in use" in error_str.lower() or "errno 98" in error_str.lower():
+                        get_chameli_logger().log_error(
+                            f"Port binding error - port {captured_port} is already in use. Try cleaning up existing proxy servers.",
+                            e,
+                            {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
+                        )
+                    else:
+                        get_chameli_logger().log_error(
+                            f"mitmproxy server error: {str(e)}",
+                            e,
+                            {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
+                        )
+                    raise
             
             # Start the thread with the event loop
             self.server_thread = threading.Thread(target=run_proxy, daemon=True)
@@ -901,13 +987,13 @@ class MitmProxyServer:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.settimeout(1.0)  # Increased timeout
                 try:
-                    result = test_sock.connect_ex(("127.0.0.1", self.local_port))
+                    result = test_sock.connect_ex(("127.0.0.1", actual_port))
                     test_sock.close()
                     if result == 0:
                         self.running = True
                         get_chameli_logger().log_info(
-                            f"mitmproxy server started and verified on port {self.local_port}",
-                            {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "attempt": attempt+1, "function": "MitmProxyServer.start"}
+                            f"mitmproxy server started and verified on port {actual_port}",
+                            {"local_port": actual_port, "upstream_proxy": self.upstream_proxy, "attempt": attempt+1, "function": "MitmProxyServer.start"}
                         )
                         return
                 except Exception:
@@ -917,13 +1003,13 @@ class MitmProxyServer:
             # Check if thread is still alive (server might be starting)
             if self.server_thread.is_alive():
                 get_chameli_logger().log_warning(
-                    f"mitmproxy server thread is alive but port {self.local_port} not yet accepting connections, marking as running anyway",
-                    {"local_port": self.local_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.start"}
+                    f"mitmproxy server thread is alive but port {actual_port} not yet accepting connections, marking as running anyway",
+                    {"local_port": actual_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.start"}
                 )
                 self.running = True
                 return
             
-            raise Exception(f"mitmproxy server started but port {self.local_port} is not accepting connections after {max_attempts} attempts")
+            raise Exception(f"mitmproxy server started but port {actual_port} is not accepting connections after {max_attempts} attempts")
         except Exception as e:
             get_chameli_logger().log_error(
                 f"Failed to start mitmproxy server",
@@ -977,6 +1063,8 @@ def get_session_or_driver(
 ):
     """
     Retrieve a session or WebDriver instance configured with proxy and authentication settings.
+    
+    Logs the credentials being used for debugging purposes.
 
     This function provides the ability to either return a `requests.Session` object or a Selenium WebDriver instance
     configured with proxy settings, user authentication, and other options. It also supports fetching proxies from
@@ -1006,6 +1094,19 @@ def get_session_or_driver(
         - The function validates proxies by testing them against the provided `url_to_test`.
         - WebRTC is disabled in the WebDriver to prevent IP leaks when using proxies.
     """
+    # Log credentials being used (for debugging webshare account issues)
+    if proxy_source == "webshare" and api_key and proxy_user:
+        get_chameli_logger().log_info(
+            "get_session_or_driver: Using webshare credentials",
+            {
+                "proxy_source": proxy_source,
+                "proxy_user": proxy_user,
+                "proxy_pass_masked": f"{proxy_password[:3]}***" if proxy_password else None,
+                "api_key_masked": f"{api_key[:10]}...{api_key[-5:]}" if api_key else None,
+                "api_key_full": api_key,  # Log full API key for debugging (can be removed later)
+                "function": "get_session_or_driver"
+            }
+        )
 
     def setup_driver_with_proxy_auth(proxy=None, proxy_user=None, proxy_pass=None):
         proxy_ip = None
@@ -1025,21 +1126,41 @@ def get_session_or_driver(
             # Use local proxy server if credentials are provided
             if proxy_user is not None and proxy_pass is not None:
                 global _active_proxy_server
+                
+                # Track local port to reuse if we need to restart
+                local_port_to_use = 8080  # Default port
 
-                # Stop existing proxy server if running with different credentials
+                # Check if we need to restart proxy server (different upstream proxy or marked as failed)
                 if _active_proxy_server and _active_proxy_server.running:
-                    if (_active_proxy_server.upstream_proxy != f"{proxy_ip}:{proxy_port}" or
+                    needs_restart = (
+                        _active_proxy_server.upstream_proxy != f"{proxy_ip}:{proxy_port}" or
                         _active_proxy_server.proxy_user != proxy_user or
-                        _active_proxy_server.proxy_pass != proxy_pass):
+                        _active_proxy_server.proxy_pass != proxy_pass or
+                        _active_proxy_server.needs_new_upstream
+                    )
+                    
+                    if needs_restart:
+                        get_chameli_logger().log_info(
+                            f"Restarting proxy server with new upstream proxy (keeping same local port)",
+                            {
+                                "old_upstream": _active_proxy_server.upstream_proxy,
+                                "new_upstream": f"{proxy_ip}:{proxy_port}",
+                                "local_port": _active_proxy_server.local_port,
+                                "function": "setup_driver_with_proxy_auth"
+                            }
+                        )
+                        # Keep the same local port to avoid Firefox reconfiguration
+                        local_port_to_use = _active_proxy_server.local_port
                         _active_proxy_server.stop()
                         _active_proxy_server = None
+                        # Will create new server below with same local port
                     else:
                         # Reuse existing proxy server
                         get_chameli_logger().log_info(
                             f"Reusing existing local proxy server",
                             {
                                 "upstream_proxy": f"{proxy_ip}:{proxy_port}",
-                                "local_proxy": "127.0.0.1:8080",
+                                "local_proxy": f"127.0.0.1:{_active_proxy_server.local_port}",
                                 "function": "setup_driver_with_proxy_auth"
                             }
                         )
@@ -1047,18 +1168,38 @@ def get_session_or_driver(
                 # Start local proxy server if not already running
                 if not _active_proxy_server or not _active_proxy_server.running:
                     try:
-                        print(f"[DEBUG] Starting local proxy server for {proxy_ip}:{proxy_port}")
+                        print(f"[DEBUG] Starting local proxy server for {proxy_ip}:{proxy_port} on port {local_port_to_use}")
                         _active_proxy_server = LocalProxyServer(
                             upstream_proxy=f"{proxy_ip}:{proxy_port}",
                             proxy_user=proxy_user,
                             proxy_pass=proxy_pass,
-                            local_port=8080  # Default port, can be made configurable
+                            local_port=local_port_to_use
                         )
                         _active_proxy_server.start()
                         print(f"[DEBUG] Proxy server started, running={_active_proxy_server.running}")
                         # Verify it's actually running
                         if not _active_proxy_server.running:
                             raise Exception("Proxy server failed to start")
+                        
+                        # Additional health check - verify proxy server is actually accepting connections
+                        import time
+                        time.sleep(0.3)  # Give it a moment to be ready
+                        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        test_sock.settimeout(1.0)
+                        try:
+                            result = test_sock.connect_ex(("127.0.0.1", 8080))
+                            test_sock.close()
+                            if result != 0:
+                                get_chameli_logger().log_warning(
+                                    f"Proxy server may not be accepting connections - connect_ex returned {result}",
+                                    {"local_port": 8080, "result": result, "function": "setup_driver_with_proxy_auth"}
+                                )
+                        except Exception as e:
+                            test_sock.close()
+                            get_chameli_logger().log_warning(
+                                f"Could not verify proxy server connection: {str(e)}",
+                                {"local_port": 8080, "error": str(e), "function": "setup_driver_with_proxy_auth"}
+                            )
                         
                         # Give the server a moment to be fully ready for connections
                         import time
@@ -1115,13 +1256,15 @@ def get_session_or_driver(
                         # Continue with driver creation - don't return here
 
                 # Configure Firefox to use local proxy (no auth needed)
+                # Use the actual port from the proxy server (may be different from 8080 if port conflict)
+                actual_proxy_port = _active_proxy_server.local_port if _active_proxy_server else 8080
                 options.set_preference("network.proxy.type", 1)  # Manual proxy config
                 options.set_preference("network.proxy.http", "127.0.0.1")
-                options.set_preference("network.proxy.http_port", 8080)
+                options.set_preference("network.proxy.http_port", actual_proxy_port)
                 options.set_preference("network.proxy.ssl", "127.0.0.1")
-                options.set_preference("network.proxy.ssl_port", 8080)
+                options.set_preference("network.proxy.ssl_port", actual_proxy_port)
                 options.set_preference("network.proxy.ftp", "127.0.0.1")
-                options.set_preference("network.proxy.ftp_port", 8080)
+                options.set_preference("network.proxy.ftp_port", actual_proxy_port)
                 options.set_preference("network.proxy.socks", "")
                 options.set_preference("network.proxy.socks_port", 0)
                 options.set_preference("network.proxy.socks_version", 0)
@@ -1132,14 +1275,15 @@ def get_session_or_driver(
                 options.set_preference("media.peerconnection.enabled", False)  # Disable WebRTC to prevent IP leaks
                 get_chameli_logger().log_info(
                     f"Firefox proxy preferences configured",
-                    {"local_proxy": "127.0.0.1:8080", "function": "setup_driver_with_proxy_auth"}
+                    {"local_proxy": f"127.0.0.1:{actual_proxy_port}", "function": "setup_driver_with_proxy_auth"}
                 )
 
+                actual_proxy_port = _active_proxy_server.local_port if _active_proxy_server else 8080
                 get_chameli_logger().log_info(
                     f"Using local proxy server for authentication",
                     {
                         "upstream_proxy": f"{proxy_ip}:{proxy_port}",
-                        "local_proxy": "127.0.0.1:8080",
+                        "local_proxy": f"127.0.0.1:{actual_proxy_port}",
                         "function": "setup_driver_with_proxy_auth"
                     }
                 )
@@ -1235,19 +1379,51 @@ def get_session_or_driver(
                         {"proxy": proxy, "test_url": test_url, "function": "test_with_webdriver"}
                     )
                     return None
-                driver.set_page_load_timeout(default_timeout)
-                driver.get(test_url)
+                # Use reasonable timeout for proxy testing - increased from 5s to 15s for slow proxies
+                # Allow up to 15 seconds for proxy to respond, but respect default_timeout if it's higher
+                test_timeout = min(default_timeout, 15) if default_timeout else 15
+                driver.set_page_load_timeout(test_timeout)
+                
+                # Add retry logic for proxy testing (some proxies are slow to respond)
+                max_retries = 2
+                for attempt in range(max_retries):
+                    try:
+                        driver.get(test_url)
+                        break  # Success, exit retry loop
+                    except Exception as retry_error:
+                        if attempt < max_retries - 1:
+                            # Log retry attempt
+                            get_chameli_logger().log_warning(
+                                f"Proxy test attempt {attempt + 1} failed for {proxy}, retrying...",
+                                {"proxy": proxy, "attempt": attempt + 1, "error": str(retry_error), "function": "test_with_webdriver"}
+                            )
+                            time.sleep(1)  # Brief delay before retry
+                            continue
+                        else:
+                            # Last attempt failed, re-raise
+                            raise
                 get_chameli_logger().log_info(
                     f"Successfully tested proxy {proxy} with WebDriver",
                     {"proxy": proxy, "test_url": test_url, "function": "test_with_webdriver"}
                 )
                 return driver
             except Exception as e:
-                get_chameli_logger().log_error(
-                    f"WebDriver test failed for proxy {proxy}: {str(e)}",
-                    e,
-                    {"proxy": proxy, "test_url": test_url, "function": "test_with_webdriver"}
-                )
+                # Check if it's a timeout error - these are common and expected for bad proxies
+                error_type = type(e).__name__
+                is_timeout = "timeout" in str(e).lower() or "Timeout" in error_type
+                
+                if is_timeout:
+                    get_chameli_logger().log_warning(
+                        f"Proxy {proxy} timed out during test (this is normal for slow/bad proxies)",
+                        {"proxy": proxy, "test_url": test_url, "timeout": test_timeout, "function": "test_with_webdriver"}
+                    )
+                else:
+                    get_chameli_logger().log_error(
+                        f"WebDriver test failed for proxy {proxy}: {str(e)}",
+                        e,
+                        {"proxy": proxy, "test_url": test_url, "error_type": error_type, "function": "test_with_webdriver"}
+                    )
+                
                 if driver:
                     try:
                         driver.quit()
@@ -1307,6 +1483,17 @@ def get_session_or_driver(
             return None
 
     def get_random_webshare_proxy(country_code=None, mode="direct"):
+        # Log API key being used for fetching proxies
+        get_chameli_logger().log_info(
+            "Fetching proxies from webshare API",
+            {
+                "api_key_masked": f"{api_key[:10]}...{api_key[-5:]}" if api_key else None,
+                "api_key_full": api_key,  # Log full API key for debugging (can be removed later)
+                "country_code": country_code,
+                "mode": mode,
+                "function": "get_random_webshare_proxy"
+            }
+        )
         if country_code:
             url = f"https://proxy.webshare.io/api/v2/proxy/list/?mode={mode}&page=1&page_size=100&country_code={country_code}"
         else:
