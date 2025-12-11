@@ -6,12 +6,42 @@ from importlib.resources import files
 from logging.handlers import TimedRotatingFileHandler
 from typing import Optional, List
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 from .config import is_config_loaded, load_config
 
 # Ensure the module's directory is in the system path
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+
+
+class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """
+    A TimedRotatingFileHandler that ensures the file is reopened after rotation.
+    
+    This fixes an issue where log rotation can cause the file handle to become stale,
+    preventing new log entries from being written after rotation occurs.
+    """
+    
+    def doRollover(self):
+        """Override to ensure stream is reopened after rotation."""
+        super().doRollover()
+        # Ensure stream is open after rotation (parent may close it)
+        if self.stream is None or self.stream.closed:
+            self.stream = self._open()
+    
+    def emit(self, record):
+        """Override to ensure stream is valid before writing."""
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+            
+            # Ensure stream is open before writing
+            if self.stream is None or self.stream.closed:
+                self.stream = self._open()
+            
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -133,7 +163,7 @@ class ChameliLogger:
             if log_dir and not os.path.exists(log_dir):
                 os.makedirs(log_dir, exist_ok=True)
 
-            file_handler = TimedRotatingFileHandler(log_file, when="midnight", backupCount=backup_count)
+            file_handler = SafeTimedRotatingFileHandler(log_file, when="midnight", backupCount=backup_count)
             file_handler.suffix = "%Y%m%d"
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
@@ -290,7 +320,7 @@ def configure_logging(
             if log_dir and not os.path.exists(log_dir):
                 os.makedirs(log_dir, exist_ok=True)
 
-            file_handler = TimedRotatingFileHandler(log_file, when="midnight", backupCount=backup_count)
+            file_handler = SafeTimedRotatingFileHandler(log_file, when="midnight", backupCount=backup_count)
             file_handler.suffix = "%Y%m%d"
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
