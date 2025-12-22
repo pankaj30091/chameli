@@ -600,19 +600,14 @@ def get_expiry(
     if weekly > 0:
         # Weekly expiry: Find the Nth weekly expiry from the input date
         def find_next_valid_expiry(start_date):
-            """Find the next valid expiry date starting from start_date (inclusive)."""
+            """Find the next valid expiry date starting from start_date (inclusive).
+            If the target weekday is a holiday/weekend, uses the previous business day."""
             current = start_date
-            while True:
-                # Find the next occurrence of the target weekday
-                while current.weekday() != day_of_week - 1:
-                    current += dt.timedelta(days=1)
-                # Adjust backward for holidays and weekends
-                adjusted = adjust_to_previous_working_day(current)
-                # If adjustment moved backward, continue from the next day
-                if adjusted < current:
-                    current = adjusted + dt.timedelta(days=1)
-                    continue
-                return adjusted
+            # Find the next occurrence of the target weekday
+            while current.weekday() != day_of_week - 1:
+                current += dt.timedelta(days=1)
+            # Adjust backward for holidays and weekends - this is the expiry date
+            return adjust_to_previous_working_day(current)
         
         # Check if today is a valid expiry day
         is_today_expiry = (date_mod.weekday() == day_of_week - 1 and 
