@@ -1102,8 +1102,7 @@ def get_session_or_driver(
                 "proxy_source": proxy_source,
                 "proxy_user": proxy_user,
                 "proxy_pass_masked": f"{proxy_password[:3]}***" if proxy_password else None,
-                "api_key_masked": f"{api_key[:10]}...{api_key[-5:]}" if api_key else None,
-                "api_key_full": api_key,  # Log full API key for debugging (can be removed later)
+                "api_key_masked": f"{api_key[:3]}***{api_key[-3:]}" if api_key else None,
                 "function": "get_session_or_driver"
             }
         )
@@ -1487,8 +1486,7 @@ def get_session_or_driver(
         get_chameli_logger().log_info(
             "Fetching proxies from webshare API",
             {
-                "api_key_masked": f"{api_key[:10]}...{api_key[-5:]}" if api_key else None,
-                "api_key_full": api_key,  # Log full API key for debugging (can be removed later)
+                "api_key_masked": f"{api_key[:3]}***{api_key[-3:]}" if api_key else None,
                 "country_code": country_code,
                 "mode": mode,
                 "function": "get_random_webshare_proxy"
