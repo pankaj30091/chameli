@@ -42,7 +42,7 @@ class Config:
                     "config_file": config_file
                 })
             except Exception as e:
-                get_chameli_logger().log_error(f"Failed to load configuration", e, {
+                get_chameli_logger().log_error("Failed to load configuration", e, {
                     "config_file": config_file
                 })
                 raise
@@ -68,7 +68,7 @@ def load_config(default_config_path, force_reload=False):
     global _config_instance
     if _config_instance is None or force_reload:
         _config_instance = Config(default_config_path)
-        get_chameli_logger().log_warning(f"Config loaded from file {_config_instance.config_path}", {
+        get_chameli_logger().log_info(f"Config loaded from file {_config_instance.config_path}", {
             "config_path": _config_instance.config_path
         })
     else:
