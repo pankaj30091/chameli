@@ -108,7 +108,7 @@ class StructuredFormatter(logging.Formatter):
 def get_default_config_path():
     """Returns the path to the default config file included in the package."""
     try:
-        return files("chameli").joinpath("config/config_sample.yaml")
+        return str(files("chameli").joinpath("config/config_sample.yaml"))
     except FileNotFoundError:
         # Fallback to relative path in the source directory
         return os.path.join(os.path.dirname(__file__), "config/config_sample.yaml")
@@ -193,7 +193,7 @@ class ChameliLogger:
             },
         )
 
-    def get_logger(self, name: str = None) -> logging.Logger:
+    def get_logger(self, name: Optional[str] = None) -> logging.Logger:
         """Get a logger instance with the specified name."""
         if name:
             return logging.getLogger(f"chameli.{name}")
@@ -215,7 +215,7 @@ class ChameliLogger:
             pass
         return {}
 
-    def log_error(self, message: str, error: Exception = None, context: dict = None, exc_info: bool = True):
+    def log_error(self, message: str, error: Optional[Exception] = None, context: Optional[dict] = None, exc_info: bool = True):
         """Log an error with structured context."""
         extra = context or {}
         if error:
@@ -228,7 +228,7 @@ class ChameliLogger:
 
         self.logger.error(message, extra=extra, exc_info=exc_info)
 
-    def log_warning(self, message: str, context: dict = None):
+    def log_warning(self, message: str, context: Optional[dict] = None):
         """Log a warning with structured context."""
         extra = context or {}
 
@@ -238,7 +238,7 @@ class ChameliLogger:
 
         self.logger.warning(message, extra=extra)
 
-    def log_info(self, message: str, context: dict = None):
+    def log_info(self, message: str, context: Optional[dict] = None):
         """Log an info message with structured context."""
         extra = context or {}
 
@@ -248,7 +248,7 @@ class ChameliLogger:
 
         self.logger.info(message, extra=extra)
 
-    def log_debug(self, message: str, context: dict = None):
+    def log_debug(self, message: str, context: Optional[dict] = None):
         """Log a debug message with structured context."""
         extra = context or {}
 

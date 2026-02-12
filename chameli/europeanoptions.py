@@ -11,8 +11,8 @@ from scipy.optimize import brentq
 from scipy.stats import norm
 
 from .config import get_config
-from .dateutils import calc_fractional_business_days, valid_datetime, apply_timezone
-from .miscutils import convert_to_dot_dict
+from .dateutils import calc_fractional_business_days, parse_datetime, apply_timezone
+from .miscutils import DotDict, convert_to_dot_dict
 
 
 # Import chameli_logger lazily to avoid circular import
@@ -82,7 +82,7 @@ def BlackScholesPrice(S: float, X: float, r: float, sigma: float, T: float, Opti
         bsp = X * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
     else:
         bsp = float("nan")
-    return bsp
+    return float(bsp)
 
 
 def get_option_price(
@@ -118,7 +118,7 @@ def get_option_price(
 
     OptionType = long_symbol.split("_")[3]
     X = float(long_symbol.split("_")[4])
-    calc_time_dt, _ = valid_datetime(calc_time)
+    calc_time_dt = parse_datetime(calc_time)
     expiry_str = long_symbol.split("_")[2]
     expiry = dt.datetime.strptime(expiry_str + " 15:30:00", "%Y%m%d %H:%M:%S")
     t = calc_fractional_business_days(calc_time_dt, expiry, exchange)
@@ -168,7 +168,7 @@ def BlackScholesDelta(S: float, X: float, r: float, sigma: float, T: float, Opti
         bsd = norm.cdf(d1) - 1
     else:
         bsd = float("nan")
-    return bsd
+    return float(bsd)
 
 
 def calc_delta(
@@ -229,7 +229,7 @@ def BlackScholesGamma(S: float, X: float, r: float, sigma: float, T: float) -> f
     # Gamma formula
     gamma = norm.pdf(d1) / (S * sigma * math.sqrt(T))
 
-    return gamma
+    return float(gamma)
 
 
 def calc_greeks(
@@ -242,7 +242,7 @@ def calc_greeks(
     risk_free_rate: float = 0,
     exchange="NSE",
     cap_theta: bool = True,  # New parameter
-) -> float:
+) -> DotDict:
     """Helper function to calculate greeks from long_symbol
 
     Args:
@@ -271,7 +271,7 @@ def calc_greeks(
     option_type = long_symbol.split("_")[3]
     expiry_str = long_symbol.split("_")[2]
     expiry = dt.datetime.strptime(expiry_str + " 15:30:00", "%Y%m%d %H:%M:%S")
-    calc_time_dt, _ = valid_datetime(calc_time)
+    calc_time_dt = parse_datetime(calc_time)
     t = calc_fractional_business_days(calc_time_dt, expiry, exchange=exchange)
     t = t / days_in_year
 
@@ -322,7 +322,7 @@ def BlackScholesVega(S: float, X: float, r: float, sigma: float, T: float) -> fl
     # Vega formula
     vega = S * math.exp(-r * T) * norm.pdf(d1) * math.sqrt(T) / 100
 
-    return vega
+    return float(vega)
 
 
 def BlackScholesTheta(
@@ -368,7 +368,7 @@ def BlackScholesTheta(
         return float("nan")
 
     # Adjust for daily Theta
-    return theta / daysInYear
+    return float(theta) / daysInYear
 
 
 def BlackScholesIV(
@@ -415,7 +415,12 @@ def BlackScholesIV(
 
     try:
         # Use Brent's method to find IV (safe & reliable)
-        iv = brentq(black_scholes_price, 1e-6, 5.0, xtol=1e-6)
+        result = brentq(black_scholes_price, 1e-6, 5.0, xtol=1e-6)
+        # Handle different possible return types from brentq
+        if isinstance(result, (tuple, list)):
+            iv = float(result[0])
+        else:
+            iv = float(result)
     except ValueError:
         # If Brent fails, fallback to Newton-Raphson
         iv = seed
@@ -430,9 +435,9 @@ def BlackScholesIV(
             iv -= price_diff / vega  # Newton-Raphson update
 
             if abs(price_diff) < 1e-6:
-                return iv
+                return float(iv)
 
-    return iv  # Return final implied volatility
+    return float(iv)  # Return final implied volatility
 
 
 def generate_opt_simulation(

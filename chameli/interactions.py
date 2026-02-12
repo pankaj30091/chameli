@@ -15,6 +15,8 @@ import requests
 import rpy2.robjects as ro
 from rpy2.robjects import pandas2ri
 from rpy2.robjects.conversion import localconverter
+from rpy2.robjects.packages import importr
+import rpy2.rinterface_lib.callbacks as rcallbacks
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options
@@ -196,12 +198,17 @@ def readRDS(filename, parent_request=""):
     filename = normalize_path(filename)
     if is_remote:
         try:
+            # Ensure the connection is active
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+
             # Create a temporary file in a cross-platform way
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 local_temp_file = temp_file.name
 
             # Download the file from the remote server to the temporary location
-            with SCPClient(remote_connection.get_transport()) as scp:
+            with SCPClient(transport) as scp:
                 scp.get(filename, local_temp_file)
 
             # Log file details
@@ -266,6 +273,158 @@ def readRDS(filename, parent_request=""):
             raise
 
 
+def preprocess_dataframe_for_r(df: pd.DataFrame, string_columns: list = None, numeric_columns: dict = None) -> pd.DataFrame:
+    """
+    Pre-process DataFrame to ensure proper NA handling for R conversion.
+    This helps reduce R warnings during pandas-to-R conversion.
+
+    Args:
+        df: The DataFrame to preprocess
+        string_columns: List of column names that should be treated as strings.
+                        If None, auto-detects based on data types and content.
+        numeric_columns: Dict mapping column names to numeric dtypes ('Int64', 'Float64').
+                         If None, auto-detects numeric columns.
+
+    Returns:
+        Preprocessed DataFrame with proper nullable dtypes for R conversion.
+
+    Note:
+        This function is generic and works with any DataFrame. For known schemas like stock data,
+        provide explicit column type mappings. For unknown schemas, it auto-detects appropriate types.
+    """
+    if df.empty:
+        return df
+
+    df_processed = df.copy()
+
+    # If no column specifications provided, auto-detect
+    if string_columns is None and numeric_columns is None:
+        string_columns, numeric_columns = _auto_detect_column_types(df_processed)
+
+    # Convert specified string columns to nullable string dtype
+    if string_columns:
+        for col in string_columns:
+            if col in df_processed.columns:
+                if not isinstance(df_processed[col].dtype, pd.StringDtype):
+                    df_processed[col] = df_processed[col].astype("string")
+
+    # Convert specified numeric columns to appropriate nullable dtypes
+    if numeric_columns:
+        for col, dtype in numeric_columns.items():
+            if col in df_processed.columns:
+                if str(df_processed[col].dtype) != dtype:
+                    try:
+                        df_processed[col] = df_processed[col].astype(dtype)
+                    except (ValueError, TypeError):
+                        # If conversion fails, try to clean the data first
+                        df_processed[col] = pd.to_numeric(df_processed[col], errors="coerce").astype(dtype)
+
+    # For any remaining columns not explicitly specified, apply smart conversion
+    for col in df_processed.columns:
+        if string_columns and col not in string_columns and numeric_columns and col not in numeric_columns:
+            _apply_smart_conversion(df_processed, col)
+
+    # Replace any remaining None/null values with pandas NA for consistency
+    df_processed = df_processed.fillna(pd.NA)
+
+    # Final validation and cleanup of NA values
+    for col in df_processed.columns:
+        if df_processed[col].isna().any():
+            # Ensure NA values are properly typed
+            if isinstance(df_processed[col].dtype, pd.StringDtype):
+                df_processed[col] = df_processed[col].astype("string")
+            elif str(df_processed[col].dtype) in ["Int64", "Float64"]:
+                # Keep nullable dtypes as they properly handle NA
+                pass
+            else:
+                # For object columns that might contain mixed types, try to convert to string
+                if df_processed[col].dtype == "object":
+                    try:
+                        df_processed[col] = df_processed[col].astype("string")
+                    except (ValueError, TypeError):
+                        # If that fails, convert everything to string representation
+                        df_processed[col] = df_processed[col].astype(str).astype("string")
+
+    return df_processed
+
+
+def _auto_detect_column_types(df: pd.DataFrame) -> tuple:
+    """
+    Auto-detect which columns should be strings vs numeric based on data content and types.
+
+    Returns:
+        tuple: (string_columns_list, numeric_columns_dict)
+    """
+    string_columns = []
+    numeric_columns = {}
+
+    for col in df.columns:
+        dtype = df[col].dtype
+
+        # Check for obvious string columns (object dtype with mostly strings)
+        if dtype == "object":
+            sample_values = df[col].dropna().head(10)  # Sample first 10 non-null values
+            if len(sample_values) > 0:
+                # If most values are strings or look like categorical data
+                string_like = sum(1 for val in sample_values if isinstance(val, str) or pd.isna(val))
+                if string_like / len(sample_values) > 0.7:  # 70% string-like
+                    string_columns.append(col)
+                    continue
+
+        # Check for numeric columns
+        if pd.api.types.is_numeric_dtype(dtype) or dtype in ["int64", "float64"]:
+            # Determine if it should be Int64 or Float64
+            if pd.api.types.is_integer_dtype(dtype) or (df[col].dropna() % 1 == 0).all():
+                numeric_columns[col] = "Int64"
+            else:
+                numeric_columns[col] = "Float64"
+        elif dtype == "object":
+            # Try to convert to numeric
+            try:
+                pd.to_numeric(df[col], errors="coerce")
+                # If successful, it might be numeric
+                sample_numeric = pd.to_numeric(df[col], errors="coerce").dropna()
+                if len(sample_numeric) > len(df[col]) * 0.5:  # At least 50% convertible to numeric
+                    if (sample_numeric % 1 == 0).all():
+                        numeric_columns[col] = "Int64"
+                    else:
+                        numeric_columns[col] = "Float64"
+                else:
+                    string_columns.append(col)
+            except (ValueError, TypeError):
+                string_columns.append(col)
+
+    return string_columns, numeric_columns
+
+
+def _apply_smart_conversion(df: pd.DataFrame, col: str) -> None:
+    """
+    Apply intelligent type conversion for unspecified columns.
+    """
+    dtype = df[col].dtype
+
+    # For object columns, try to infer the best type
+    if dtype == "object":
+        try:
+            # Try converting to numeric first
+            numeric_series = pd.to_numeric(df[col], errors="coerce")
+            if numeric_series.notna().sum() > len(df[col]) * 0.8:  # 80% success rate
+                if (numeric_series.dropna() % 1 == 0).all():
+                    df[col] = numeric_series.astype("Int64")
+                else:
+                    df[col] = numeric_series.astype("Float64")
+                return
+        except (ValueError, TypeError):
+            pass
+
+        # If numeric conversion didn't work well, convert to string
+        try:
+            df[col] = df[col].astype("string")
+        except (ValueError, TypeError):
+            # Last resort: convert to string representation
+            df[col] = df[col].astype(str).astype("string")
+
+
 def saveRDS(pd_file, path):
     """
     Save a pandas DataFrame to an RDS file locally or on a remote server.
@@ -275,6 +434,7 @@ def saveRDS(pd_file, path):
         path (str): Path to save the RDS file.
     """
     global remote_connection, is_remote
+    base = importr('base')
 
     # Normalize the path
     path = normalize_path(path)
@@ -285,13 +445,51 @@ def saveRDS(pd_file, path):
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 local_temp_file = temp_file.name
 
-            # Save the RDS file locally first
-            with localconverter(ro.default_converter + pandas2ri.converter):
-                r_from_pd_df = ro.conversion.py2rpy(pd_file)
-            ro.r["saveRDS"](r_from_pd_df, local_temp_file, version=2)
+            # Set up warning capture for R operations
+            warnings_collected = []
+            original_warn_callback = rcallbacks.consolewrite_warnerror
+
+            def collect_warnings(message):
+                warnings_collected.append(str(message))
+
+            rcallbacks.consolewrite_warnerror = collect_warnings
+
+            try:
+                # Pre-process DataFrame to ensure proper NA handling for stock extras data
+                string_columns = ["symbol", "update_date", "circuit_band", "basic_industry", "industry", "sector"]
+                numeric_columns = {
+                    "outstanding_shares": "Int64",
+                    "free_float_shares": "Int64",
+                    "price": "Float64"
+                }
+                pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
+
+                # Save the RDS file locally first
+                with localconverter(ro.default_converter + pandas2ri.converter):
+                    r_from_pd_df = ro.conversion.py2rpy(pd_file)
+                base.saveRDS(r_from_pd_df, local_temp_file, version=2)
+
+                # Log any R warnings that were generated
+                if warnings_collected:
+                    for i, warning in enumerate(warnings_collected[:50]):  # Show first 50 as R does
+                        get_chameli_logger().log_warning(
+                            f"R warning {i+1}: {warning}",
+                            {"file_path": path, "operation": "save_remote", "warning_index": i+1}
+                        )
+                    if len(warnings_collected) > 50:
+                        get_chameli_logger().log_warning(
+                            f"Additional {len(warnings_collected) - 50} R warnings not shown",
+                            {"file_path": path, "operation": "save_remote", "total_warnings": len(warnings_collected)}
+                        )
+            finally:
+                # Restore original warning callback
+                rcallbacks.consolewrite_warnerror = original_warn_callback
 
             # Upload the file to the remote server
-            with SCPClient(remote_connection.get_transport()) as scp:
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+            with SCPClient(transport) as scp:
                 scp.put(local_temp_file, path)  # Upload the file to the remote server
 
             get_chameli_logger().log_info(
@@ -308,13 +506,49 @@ def saveRDS(pd_file, path):
                 os.remove(local_temp_file)
     else:
         try:
-            # Save the RDS file locally
-            with localconverter(ro.default_converter + pandas2ri.converter):
-                r_from_pd_df = ro.conversion.py2rpy(pd_file)
-            ro.r["saveRDS"](r_from_pd_df, path, version=2)
-            get_chameli_logger().log_info(
-                f"RDS file successfully saved locally: {path}", {"file_path": path, "operation": "save_local"}
-            )
+            # Set up warning capture for R operations
+            warnings_collected = []
+            original_warn_callback = rcallbacks.consolewrite_warnerror
+
+            def collect_warnings(message):
+                warnings_collected.append(str(message))
+
+            rcallbacks.consolewrite_warnerror = collect_warnings
+
+            try:
+                # Pre-process DataFrame to ensure proper NA handling for stock extras data
+                string_columns = ["symbol", "update_date", "circuit_band", "basic_industry", "industry", "sector"]
+                numeric_columns = {
+                    "outstanding_shares": "Int64",
+                    "free_float_shares": "Int64",
+                    "price": "Float64"
+                }
+                pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
+
+                # Save the RDS file locally
+                with localconverter(ro.default_converter + pandas2ri.converter):
+                    r_from_pd_df = ro.conversion.py2rpy(pd_file)
+                base.saveRDS(r_from_pd_df, path, version=2)
+
+                # Log any R warnings that were generated
+                if warnings_collected:
+                    for i, warning in enumerate(warnings_collected[:50]):  # Show first 50 as R does
+                        get_chameli_logger().log_warning(
+                            f"R warning {i+1}: {warning}",
+                            {"file_path": path, "operation": "save_local", "warning_index": i+1}
+                        )
+                    if len(warnings_collected) > 50:
+                        get_chameli_logger().log_warning(
+                            f"Additional {len(warnings_collected) - 50} R warnings not shown",
+                            {"file_path": path, "operation": "save_local", "total_warnings": len(warnings_collected)}
+                        )
+
+                get_chameli_logger().log_info(
+                    f"RDS file successfully saved locally: {path}", {"file_path": path, "operation": "save_local"}
+                )
+            finally:
+                # Restore original warning callback
+                rcallbacks.consolewrite_warnerror = original_warn_callback
         except Exception as e:
             get_chameli_logger().log_error(
                 "Failed to save RDS file locally", e, {"file_path": path, "operation": "save_local"}
@@ -342,7 +576,10 @@ def save_file(dest_file, content):
                     file.write(content)
 
             # Upload the file to the remote server
-            with SCPClient(remote_connection.get_transport()) as scp:
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+            with SCPClient(transport) as scp:
                 scp.put(local_temp_file, dest_file)  # Upload the file to the remote server
 
             get_chameli_logger().log_info(
@@ -448,10 +685,14 @@ def read_csv_in_pandas_out(file_path, **kwargs):
 
     if is_remote:
         try:
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 local_temp_file = temp_file.name
 
-            with SCPClient(remote_connection.get_transport()) as scp:
+            with SCPClient(transport) as scp:
                 scp.get(file_path, local_temp_file)
 
             df = pd.read_csv(local_temp_file, **kwargs)
@@ -502,7 +743,10 @@ def save_pandas_in_csv_out(df, dest_file, **kwargs):
                 local_temp_file = temp_file.name
                 df.to_csv(local_temp_file, **kwargs)
 
-            with SCPClient(remote_connection.get_transport()) as scp:
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+            with SCPClient(transport) as scp:
                 scp.put(local_temp_file, dest_file)
 
             get_chameli_logger().log_info(
@@ -550,10 +794,14 @@ def read_csv_from_zip(dest_file, min_size=1000, file_index=0, **kwargs):
 
     if is_remote:
         try:
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 local_temp_file = temp_file.name
 
-            with SCPClient(remote_connection.get_transport()) as scp:
+            with SCPClient(transport) as scp:
                 scp.get(dest_file, local_temp_file)
 
             with zipfile.ZipFile(local_temp_file, "r") as z:
@@ -585,10 +833,14 @@ def read_file(source_file):
 
     if is_remote:
         try:
+            transport = remote_connection.get_transport()
+            if transport is None:
+                raise Exception("SSH transport is not available")
+
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 local_temp_file = temp_file.name
 
-            with SCPClient(remote_connection.get_transport()) as scp:
+            with SCPClient(transport) as scp:
                 scp.get(source_file, local_temp_file)
 
             with open(local_temp_file, "rb") as file:
@@ -1303,6 +1555,8 @@ def get_session_or_driver(
 
         # Use the user-provided WebDriver path if available, otherwise fall back to the YAML config
         driver_path = webdriver_path if webdriver_path else get_dynamic_config().get("driver_path", "")
+        if not isinstance(driver_path, str) or not driver_path:
+            raise ValueError("A valid string path for GeckoDriver must be provided")
         service = Service(driver_path)
         
         try:
@@ -1532,7 +1786,9 @@ def get_session_or_driver(
             options = Options()
             options.add_argument("--headless")
             driver_path = webdriver_path if webdriver_path else get_dynamic_config().get("driver_path", "")
-            service = Service(driver_path)
+            if not isinstance(driver_path, str) or driver_path == "":
+                raise ValueError("Invalid driver_path provided for geckodriver.")
+            service = Service(executable_path=driver_path)
             driver = webdriver.Firefox(service=service, options=options)
 
             try:

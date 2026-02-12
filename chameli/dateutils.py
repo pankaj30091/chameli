@@ -82,27 +82,39 @@ holidays = load_holidays_by_exchange()
 market_timings = load_timings_by_exchange()
 
 
-def valid_datetime(sdatetime, out_pattern=None):
-    """Parses and validates a given datetime string or object against multiple patterns.
-
-    This function attempts to parse a datetime string or object (`sdatetime`) using a predefined
-    set of patterns. If the input is already a `datetime` or `date` object, it can optionally
-    format it into a string using the specified `out_pattern`. If parsing or formatting fails,
-    the function returns `(False, False)`.
-
-        sdatetime (str | datetime.datetime | datetime.date):
-            The input datetime string or object to validate and parse.
-        out_pattern (str, optional):
-            The desired output format for the datetime object. Defaults to None.
-
-        tuple:
-            - If successful:
-                - A `datetime` object or formatted string (if `out_pattern` is provided).
-                - The pattern used for parsing (or `None` if `sdatetime` is already a datetime object).
-            - If unsuccessful:
-                - `(False, False)` indicating the input could not be parsed or formatted.
+def parse_datetime(date_str: Union[str, dt.datetime, dt.date, pd.Timestamp]) -> dt.datetime:
     """
-    for pattern in [
+    Parse a date string or object into a datetime object.
+
+    Supports multiple date formats and handles existing datetime/date objects.
+    Raises ValueError if parsing fails.
+
+    Args:
+        date_str: The date to parse. Can be a string in various formats,
+                 or an existing datetime/date/Timestamp object.
+
+    Returns:
+        datetime: A datetime object.
+
+    Raises:
+        ValueError: If the input cannot be parsed into a datetime.
+        TypeError: If the input type is not supported.
+    """
+    # Handle existing datetime/date objects
+    if isinstance(date_str, dt.datetime):
+        return date_str
+    elif isinstance(date_str, dt.date) and not isinstance(date_str, dt.datetime):
+        # Convert date to datetime at midnight
+        return dt.datetime.combine(date_str, dt.time.min)
+    elif isinstance(date_str, pd.Timestamp):
+        return date_str.to_pydatetime()
+
+    # Must be a string to parse
+    if not isinstance(date_str, str):
+        raise TypeError(f"Unsupported input type: {type(date_str)}. Expected str, datetime, date, or Timestamp.")
+
+    # Try parsing with various patterns
+    patterns = [
         "%d-%b-%Y",
         "%d-%b-%Y %H:%M:%S",
         "%Y%m%d%H%M%S",
@@ -116,25 +128,131 @@ def valid_datetime(sdatetime, out_pattern=None):
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y%m%d %H:%M:%S",
         "%Y%m%d-%H%M%S",
-    ]:
-        try:
-            if isinstance(sdatetime, (dt.datetime, dt.date)):
-                if not out_pattern:
-                    if isinstance(sdatetime, pd.Timestamp):
-                        return sdatetime.to_pydatetime(), None
-                    else:
-                        return sdatetime, None
-                else:
-                    return dt.datetime.strftime(sdatetime, out_pattern), None
+    ]
 
-            dt_parsed = dt.datetime.strptime(sdatetime, pattern)
-            if out_pattern is not None:
-                return dt_parsed.strftime(out_pattern), pattern
-            else:
-                return dt_parsed, pattern
-        except (ValueError, TypeError):
+    for pattern in patterns:
+        try:
+            return dt.datetime.strptime(date_str, pattern)
+        except ValueError:
             continue
-    return False, False
+
+    raise ValueError(f"Could not parse date string: '{date_str}'. Supported formats include YYYY-MM-DD, DD-MMM-YYYY, etc.")
+
+
+def format_datetime(dt_obj: Union[str, dt.datetime, dt.date, pd.Timestamp], pattern: str) -> str:
+    """
+    Format a datetime, date, date string, or pandas Timestamp to a string using the specified pattern.
+
+    If a string is provided, it will be parsed first using parse_datetime().
+    Pandas Timestamps are converted to datetime objects for formatting.
+
+    Args:
+        dt_obj: The datetime, date object, date string, or pandas Timestamp to format.
+        pattern: The strftime pattern to use for formatting.
+
+    Returns:
+        str: The formatted datetime string.
+
+    Raises:
+        TypeError: If dt_obj is not a datetime, date, string, or Timestamp object.
+        ValueError: If the pattern is invalid or string cannot be parsed.
+    """
+    # Handle string inputs by parsing first
+    if isinstance(dt_obj, str):
+        dt_obj = parse_datetime(dt_obj)
+    # Handle pandas Timestamp by converting to datetime
+    elif isinstance(dt_obj, pd.Timestamp):
+        dt_obj = dt_obj.to_pydatetime()
+
+    # Now handle the parsed datetime/date objects as before
+    if isinstance(dt_obj, dt.datetime):
+        obj_to_format = dt_obj
+    elif isinstance(dt_obj, dt.date) and not isinstance(dt_obj, dt.datetime):
+        # Convert date to datetime at midnight for formatting
+        obj_to_format = dt.datetime.combine(dt_obj, dt.time.min)
+    else:
+        raise TypeError(f"Expected datetime, date, string, or Timestamp object, got {type(dt_obj)}")
+
+    try:
+        return obj_to_format.strftime(pattern)
+    except ValueError as e:
+        raise ValueError(f"Invalid format pattern '{pattern}': {e}")
+
+
+def normalize_to_date(date_input: Union[str, dt.datetime, dt.date, pd.Timestamp]) -> dt.date:
+    """
+    Normalize any date-like input to a date object.
+
+    Args:
+        date_input: The date input to normalize.
+
+    Returns:
+        date: A date object.
+
+    Raises:
+        ValueError: If the input cannot be converted to a date.
+        TypeError: If the input type is not supported.
+    """
+    try:
+        dt_obj = parse_datetime(date_input)
+        return dt_obj.date()
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Could not normalize to date: {e}")
+
+
+def valid_datetime(sdatetime, out_pattern=None):
+    """
+    Parses and validates a given datetime string or object against multiple patterns.
+
+    LEGACY FUNCTION: This function is maintained for backward compatibility.
+    New code should use parse_datetime() and format_datetime() instead.
+
+    This function attempts to parse a datetime string or object (`sdatetime`) using a predefined
+    set of patterns. If the input is already a `datetime` or `date` object, it can optionally
+    format it into a string using the specified `out_pattern`. If parsing or formatting fails,
+    the function returns `(False, False)`.
+
+    Args:
+        sdatetime (str | datetime.datetime | datetime.date):
+            The input datetime string or object to validate and parse.
+        out_pattern (str, optional):
+            The desired output format for the datetime object. Defaults to None.
+
+    Returns:
+        tuple:
+            - If successful:
+                - A `datetime` object or formatted string (if `out_pattern` is provided).
+                - The pattern used for parsing (or `None` if `sdatetime` is already a datetime object).
+            - If unsuccessful:
+                - `(False, False)` indicating the input could not be parsed or formatted.
+    """
+    try:
+        # Handle existing datetime/date objects
+        if isinstance(sdatetime, (dt.datetime, dt.date)):
+            if not out_pattern:
+                if isinstance(sdatetime, pd.Timestamp):
+                    return sdatetime.to_pydatetime(), None
+                else:
+                    return sdatetime, None
+            else:
+                if isinstance(sdatetime, dt.datetime):
+                    return format_datetime(sdatetime, out_pattern), None
+                elif isinstance(sdatetime, dt.date):
+                    # Convert date to datetime at midnight, then format
+                    dt_obj = dt.datetime.combine(sdatetime, dt.time.min)
+                    return format_datetime(dt_obj, out_pattern), None
+
+        # Parse string input
+        dt_parsed = parse_datetime(sdatetime)
+
+        if out_pattern is not None:
+            return format_datetime(dt_parsed, out_pattern), None  # Pattern info not preserved in new design
+        else:
+            return dt_parsed, None  # Pattern info not preserved in new design
+
+    except (ValueError, TypeError):
+        # Maintain backward compatibility with silent failure
+        return False, False
 
 
 def is_business_day(date, exchange="NSE"):
@@ -157,9 +275,8 @@ def is_business_day(date, exchange="NSE"):
         ValueError: If the input date is invalid or cannot be parsed.
     """
 
-    date, _ = valid_datetime(date)
-    date = date.date() if isinstance(date, dt.datetime) else date
-    return date.weekday() < 5 and date not in holidays.get(exchange)
+    date_obj = normalize_to_date(date)
+    return date_obj.weekday() < 5 and date_obj not in holidays.get(exchange, [])
 
 
 def business_days_between(start_date, end_date, include_first=False, include_last=False, exchange="NSE"):
@@ -205,13 +322,9 @@ def business_days_between(start_date, end_date, include_first=False, include_las
         return business_days
 
     try:
-        start_date, _ = valid_datetime(start_date)
-        is_datetime = isinstance(start_date, dt.datetime)
-        start_date = start_date.date() if is_datetime else start_date
-        end_date, _ = valid_datetime(end_date)
-        is_datetime = isinstance(end_date, dt.datetime)
-        end_date = end_date.date() if is_datetime else end_date
-    except Exception as e:
+        start_date = normalize_to_date(start_date)
+        end_date = normalize_to_date(end_date)
+    except ValueError as e:
         get_chameli_logger().log_error(
             f"start_date:{start_date}, end_date:{end_date} are not properly formatted!! exiting business day calculation",
             e,
@@ -276,14 +389,15 @@ def calc_fractional_business_days(
     market_close_time = market_timings.get(exchange).get("close_time")
 
     try:
-        # Validate inputs
-        start_date_str, _ = valid_datetime(start_datetime, "%Y-%m-%d %H:%M:%S")
-        end_date_str, _ = valid_datetime(end_datetime, "%Y-%m-%d %H:%M:%S")
-    except Exception as e:
+        # Parse inputs to datetime objects
+        start_dt_parsed = parse_datetime(start_datetime)
+        end_dt_parsed = parse_datetime(end_datetime)
+    except ValueError as e:
         raise ValueError(f"Invalid date format: {e}")
 
-    if not start_date_str or not end_date_str:
-        raise ValueError("Both start_time and end_time should be valid timestamps or strings")
+    # Format to ensure consistent string format
+    start_date_str = format_datetime(start_dt_parsed, "%Y-%m-%d %H:%M:%S")
+    end_date_str = format_datetime(end_dt_parsed, "%Y-%m-%d %H:%M:%S")
 
     if start_date_str > end_date_str:
         raise ValueError("Start time cannot be after end time")
@@ -311,8 +425,7 @@ def calc_fractional_business_days(
     if biz_days < 0:
         get_chameli_logger().log_error(
             f"End date {end_datetime} cannot be earlier than start date {start_datetime}",
-            None,
-            {"end_datetime": str(end_datetime), "start_datetime": str(start_datetime)},
+            context={"end_datetime": str(end_datetime), "start_datetime": str(start_datetime)},
         )
         return np.nan
 
@@ -393,15 +506,19 @@ def advance_by_biz_days(
         datetime.date(2023, 2, 28)
     """
 
-    # Parse the input datetime
-    # Parse the input date using valid_datetime
-    parsed_date, input_format = valid_datetime(datetime_)
+    # Parse the input datetime using the new parse_datetime function
+    parsed_date = parse_datetime(datetime_)
 
     # Determine if the input was a datetime or date
     is_datetime = isinstance(parsed_date, dt.datetime)
 
     # Normalize to date for processing
     current_date = parsed_date.date() if is_datetime else parsed_date
+
+    # For string inputs, determine output format based on input
+    input_had_time = False
+    if isinstance(datetime_, str):
+        input_had_time = " " in datetime_ or "T" in datetime_
 
     # If days > 0 or < 0, move by business days
     if days != 0:
@@ -420,7 +537,11 @@ def advance_by_biz_days(
 
     # Convert back to the original format
     if isinstance(datetime_, str):
-        return current_date.strftime(input_format)
+        # Return in the same format as input (date-only or datetime)
+        if input_had_time:
+            return current_date.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return current_date.strftime("%Y-%m-%d")
     elif isinstance(datetime_, pd.Timestamp):
         return pd.Timestamp(current_date).tz_localize(parsed_date.tzinfo)
     elif isinstance(datetime_, dt.datetime):
@@ -439,8 +560,7 @@ def business_minutes_shift(
     Positive `minutes` moves forward, negative moves backward.
     """
     # Ensure start_time is a datetime object
-    parsed_date, input_format = valid_datetime(start_time)
-    is_datetime = isinstance(parsed_date, dt.datetime)
+    parsed_date = parse_datetime(start_time)
     if not isinstance(parsed_date, dt.datetime):
         raise ValueError("start_time must be a datetime or string convertible to datetime")
 
@@ -483,23 +603,13 @@ def business_minutes_shift(
             minutes_since_open = int((current - open_dt).total_seconds() // 60)
             if remaining <= minutes_since_open:
                 temp = current - dt.timedelta(minutes=remaining)
-                if isinstance(start_time, str):
-                    return temp.strftime(input_format)
-                elif is_datetime:
-                    return temp.replace(tzinfo=parsed_date.tzinfo)
-                else:
-                    return temp
+                return temp
             else:
                 remaining -= minutes_since_open
                 # Move to previous business day close
                 prev_biz_day = advance_by_biz_days(current.date(), -1, exchange)
                 current = dt.datetime.combine(prev_biz_day, market_close)
-    if isinstance(start_time, str):
-        return current.strftime(input_format)
-    elif is_datetime:
-        return current.replace(tzinfo=parsed_date.tzinfo)
-    else:
-        return current
+    return current
 
     return current
 
@@ -536,7 +646,7 @@ def apply_timezone(dt_obj, exchange: str):
 
 def get_expiry(
     date: Union[str, dt.datetime, dt.date], weekly=0, day_of_week: int = 4, exchange="NSE"
-) -> Union[str, dt.datetime, dt.date]:
+) -> dt.date:
     """
     Calculate the last working expiry date for a given input date.
 
@@ -548,7 +658,7 @@ def get_expiry(
         exchange (str, optional): Exchange holidays to consider. Defaults to NSE.
 
     Returns:
-        Union[str, dt.datetime, dt.date]: Expiry date in the same format as the input.
+        dt.date: Expiry date as a date object.
     """
 
     def adjust_to_previous_working_day(target_date):
@@ -588,14 +698,11 @@ def get_expiry(
         # Adjust for holidays and weekends
         return adjust_to_previous_working_day(last_day)
 
-    # Parse the input date using valid_datetime
-    parsed_date, input_format = valid_datetime(date)
-
-    # Determine if the input was a datetime or date
-    is_datetime = isinstance(parsed_date, dt.datetime)
+    # Parse the input date using the new parse_datetime function
+    parsed_date = parse_datetime(date)
 
     # Normalize to date for processing
-    date_mod = parsed_date.date() if is_datetime else parsed_date
+    date_mod = parsed_date.date() if isinstance(parsed_date, dt.datetime) else parsed_date
 
     if weekly > 0:
         # Weekly expiry: Find the Nth weekly expiry from the input date
@@ -610,8 +717,8 @@ def get_expiry(
             return adjust_to_previous_working_day(current)
         
         # Check if today is a valid expiry day
-        is_today_expiry = (date_mod.weekday() == day_of_week - 1 and 
-                          date_mod not in holidays.get(exchange))
+        is_today_expiry = (date_mod.weekday() == day_of_week - 1 and
+                          date_mod not in holidays.get(exchange, []))
         
         if is_today_expiry and weekly == 1:
             # Today is an expiry day and we want the first week, so return today
@@ -645,14 +752,8 @@ def get_expiry(
     while expiry < date_mod:
         expiry += dt.timedelta(days=1)
 
-    # Return the expiry date in the same format as the input
-    if isinstance(date, str):
-        return expiry.strftime(input_format)
-    elif is_datetime:
-        combined_date = dt.datetime.combine(expiry, dt.datetime.min.time())
-        return combined_date.replace(tzinfo=parsed_date.tzinfo)
-    else:
-        return expiry
+    # Return the expiry date
+    return expiry
 
 
 def is_aware(datetime_: Union[pd.Timestamp, dt.datetime]) -> bool:
@@ -744,6 +845,81 @@ def get_naive_dt(datetime_: Union[dt.datetime, pd.Timestamp]) -> Union[dt.dateti
             return datetime_
     else:
         raise ValueError("Input should be either datetime.datetime or pd.Timestamp")
+
+
+def safe_datetime_compare(series: pd.Series, compare_value, op: str) -> pd.Series:
+    """
+    Safely compare a pandas Series with mixed datetime/string types.
+
+    This function handles pandas Series that contain a mix of datetime objects,
+    pandas Timestamps, and empty strings, which is common when working with
+    trade data from various sources.
+
+    Args:
+        series (pd.Series): pandas Series containing mixed datetime/string types
+        compare_value: value to compare against (datetime-like, will be converted using parse_datetime)
+        op (str): comparison operator ('>=', '<=', '==', '!=')
+
+    Returns:
+        pd.Series: boolean Series with same index as input, where each element
+                   indicates whether the comparison was true for that row
+
+    Examples:
+        >>> entry_times = pd.Series([pd.Timestamp('2024-01-01 10:00:00'), '', '2024-01-02 11:00:00'])
+        >>> result = safe_datetime_compare(entry_times, '2024-01-01 09:00:00', '>=')
+        >>> result.tolist()
+        [True, False, True]
+    """
+    result = pd.Series([False] * len(series), index=series.index, dtype=bool)
+
+    # Handle string comparisons (empty strings)
+    str_mask = series.astype(str) == ""
+    if op == "==":
+        result = result | str_mask
+    elif op == "!=":
+        result = result | ~str_mask
+
+    # Handle datetime comparisons (skip empty strings)
+    dt_mask = ~str_mask
+    if dt_mask.any():
+        try:
+            # Convert series values to datetime, skipping empty strings
+            dt_series = pd.Series([pd.NaT] * len(series), index=series.index, dtype='datetime64[ns]')
+            for idx in dt_mask[dt_mask].index:
+                try:
+                    dt_series.loc[idx] = parse_datetime(series.loc[idx])
+                except (ValueError, TypeError):
+                    dt_series.loc[idx] = pd.NaT
+
+            # Convert compare value to datetime
+            compare_dt = parse_datetime(compare_value)
+
+            # Perform the requested comparison
+            if op == "<=":
+                dt_result = dt_series <= compare_dt
+            elif op == ">=":
+                dt_result = dt_series >= compare_dt
+            elif op == "==":
+                dt_result = dt_series == compare_dt
+            elif op == "!=":
+                dt_result = dt_series != compare_dt
+            elif op == "<":
+                dt_result = dt_series < compare_dt
+            elif op == ">":
+                dt_result = dt_series > compare_dt
+            else:
+                # Unsupported operator, return False for all
+                dt_result = pd.Series([False] * dt_mask.sum(), index=dt_mask[dt_mask].index, dtype=bool)
+
+            # Handle NaT values (failed conversions) as False
+            dt_result = dt_result.fillna(False)
+            result.loc[dt_mask] = dt_result
+
+        except (ValueError, TypeError):
+            # If conversion fails, treat as no match
+            result.loc[dt_mask] = False
+
+    return result
 
 
 def is_time_between(begin_time: dt.time, end_time: dt.time, check_time: dt.time = dt.datetime.now().time()) -> bool:
