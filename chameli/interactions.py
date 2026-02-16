@@ -226,9 +226,8 @@ def readRDS(filename, parent_request=""):
             if data:
                 return data[None]
         except Exception as e:
-            get_chameli_logger().log_error(
+            get_chameli_logger().log_info(
                 "Failed to read RDS file from remote server",
-                e,
                 {"file_path": local_temp_file, "operation": "read_remote"},
             )
             if os.path.exists(local_temp_file):
@@ -237,7 +236,7 @@ def readRDS(filename, parent_request=""):
                     e,
                     {"file_path": local_temp_file, "file_size": os.path.getsize(local_temp_file)},
                 )
-            raise
+            return pd.DataFrame()
         finally:
             # Clean up the temporary file
             if os.path.exists(local_temp_file):
@@ -259,9 +258,8 @@ def readRDS(filename, parent_request=""):
             if data:
                 return data[None]
         except Exception as e:
-            get_chameli_logger().log_error(
+            get_chameli_logger().log_info(
                 "Failed to read RDS file locally",
-                e,
                 {"file_path": filename, "operation": "read_local", parent_request: parent_request},
             )
             if os.path.exists(filename):
@@ -270,10 +268,10 @@ def readRDS(filename, parent_request=""):
                     e,
                     {"file_path": filename, "file_size": os.path.getsize(filename)},
                 )
-            raise
+            return pd.DataFrame()
 
 
-def preprocess_dataframe_for_r(df: pd.DataFrame, string_columns: list = None, numeric_columns: dict = None) -> pd.DataFrame:
+def preprocess_dataframe_for_r(df: pd.DataFrame, string_columns: list | None = None, numeric_columns: dict | None = None) -> pd.DataFrame:
     """
     Pre-process DataFrame to ensure proper NA handling for R conversion.
     This helps reduce R warnings during pandas-to-R conversion.
