@@ -2,6 +2,7 @@ import inspect
 import logging
 import os
 import sys
+import warnings
 from importlib.resources import files
 from logging.handlers import TimedRotatingFileHandler
 from typing import Optional, List
@@ -182,6 +183,15 @@ class ChameliLogger:
 
         self._configured = True
 
+        # Redirect Python warnings to logging system
+        logging.captureWarnings(True)
+        warnings_logger = logging.getLogger("py.warnings")
+        warnings_logger.setLevel(level)
+        # Ensure warnings go through our structured formatter
+        for handler in self.logger.handlers:
+            if handler not in warnings_logger.handlers:
+                warnings_logger.addHandler(handler)
+
         # Log configuration
         self.logger.info(
             "Chameli logging configured",
@@ -190,6 +200,7 @@ class ChameliLogger:
                 "level": logging.getLevelName(level),
                 "console_enabled": enable_console,
                 "structured_logging": enable_structured_logging,
+                "warnings_redirected": True,
             },
         )
 
