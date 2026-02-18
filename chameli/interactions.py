@@ -296,6 +296,22 @@ def _convert_large_integers_for_r(df: pd.DataFrame) -> pd.DataFrame:
     return df_out
 
 
+def _convert_datetime_columns_for_r(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert datetime columns to string (YYYY-MM-DD) so rpy2 pandas2ri does not fail on
+    timezone-aware datetimes (e.g. datetime.timezone has no .zone attribute).
+    """
+    df_out = df.copy()
+    for col in df_out.columns:
+        try:
+            if pd.api.types.is_datetime64_any_dtype(df_out[col]):
+                # timezone-aware or -naive: format as date string to avoid rpy2 .zone error
+                df_out[col] = pd.to_datetime(df_out[col], utc=True).dt.strftime("%Y-%m-%d").astype("string")
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return df_out
+
+
 def preprocess_dataframe_for_r(df: pd.DataFrame, string_columns: list | None = None, numeric_columns: dict | None = None) -> pd.DataFrame:
     """
     Pre-process DataFrame to ensure proper NA handling for R conversion.
@@ -487,6 +503,7 @@ def saveRDS(pd_file, path):
                 }
                 pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
                 pd_file = _convert_large_integers_for_r(pd_file)
+                pd_file = _convert_datetime_columns_for_r(pd_file)
 
                 # Save the RDS file locally first
                 with localconverter(ro.default_converter + pandas2ri.converter):
@@ -549,6 +566,7 @@ def saveRDS(pd_file, path):
                 }
                 pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
                 pd_file = _convert_large_integers_for_r(pd_file)
+                pd_file = _convert_datetime_columns_for_r(pd_file)
 
                 # Save the RDS file locally
                 with localconverter(ro.default_converter + pandas2ri.converter):
