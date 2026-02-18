@@ -279,18 +279,25 @@ _R_INT32_MIN = -2147483648
 def _convert_large_integers_for_r(df: pd.DataFrame) -> pd.DataFrame:
     """
     Convert integer columns that exceed R's 32-bit int range to float64/Float64.
-    Prevents rpy2 pandas2ri warnings: "integer ... does not fit '32-bit int'. Fall back to string conversion."
+    Handles int64/Int64 and object columns (e.g. "oi" from CSV) so rpy2 pandas2ri
+    does not warn: "integer ... does not fit '32-bit int'. Fall back to string conversion."
     """
     df_out = df.copy()
     for col in df_out.columns:
         d = df_out[col].dtype
         dname = getattr(d, "name", str(d))
-        if dname not in ("int64", "Int64"):
-            continue
         try:
-            valid = df_out[col].dropna()
-            if len(valid) and (valid.max() > _R_INT32_MAX or valid.min() < _R_INT32_MIN):
-                df_out[col] = df_out[col].astype("Float64" if dname == "Int64" else "float64")
+            if dname in ("int64", "Int64"):
+                valid = df_out[col].dropna()
+                if len(valid) and (valid.max() > _R_INT32_MAX or valid.min() < _R_INT32_MIN):
+                    df_out[col] = df_out[col].astype("Float64" if dname == "Int64" else "float64")
+            elif dname == "object":
+                # Object columns may contain Python ints that exceed 32-bit (e.g. "oi")
+                numeric_vals = pd.to_numeric(df_out[col], errors="coerce")
+                if numeric_vals.notna().any():
+                    n = numeric_vals.dropna()
+                    if len(n) and (n.max() > _R_INT32_MAX or n.min() < _R_INT32_MIN):
+                        df_out[col] = numeric_vals.astype("float64")
         except (TypeError, ValueError, AttributeError):
             pass
     return df_out
