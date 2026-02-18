@@ -271,6 +271,31 @@ def readRDS(filename, parent_request=""):
             return pd.DataFrame()
 
 
+# R's integer type is 32-bit; values outside this range cause rpy2 to fall back to string conversion and emit warnings
+_R_INT32_MAX = 2147483647
+_R_INT32_MIN = -2147483648
+
+
+def _convert_large_integers_for_r(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert integer columns that exceed R's 32-bit int range to float64/Float64.
+    Prevents rpy2 pandas2ri warnings: "integer ... does not fit '32-bit int'. Fall back to string conversion."
+    """
+    df_out = df.copy()
+    for col in df_out.columns:
+        d = df_out[col].dtype
+        dname = getattr(d, "name", str(d))
+        if dname not in ("int64", "Int64"):
+            continue
+        try:
+            valid = df_out[col].dropna()
+            if len(valid) and (valid.max() > _R_INT32_MAX or valid.min() < _R_INT32_MIN):
+                df_out[col] = df_out[col].astype("Float64" if dname == "Int64" else "float64")
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return df_out
+
+
 def preprocess_dataframe_for_r(df: pd.DataFrame, string_columns: list | None = None, numeric_columns: dict | None = None) -> pd.DataFrame:
     """
     Pre-process DataFrame to ensure proper NA handling for R conversion.
@@ -461,6 +486,7 @@ def saveRDS(pd_file, path):
                     "price": "Float64"
                 }
                 pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
+                pd_file = _convert_large_integers_for_r(pd_file)
 
                 # Save the RDS file locally first
                 with localconverter(ro.default_converter + pandas2ri.converter):
@@ -522,6 +548,7 @@ def saveRDS(pd_file, path):
                     "price": "Float64"
                 }
                 pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
+                pd_file = _convert_large_integers_for_r(pd_file)
 
                 # Save the RDS file locally
                 with localconverter(ro.default_converter + pandas2ri.converter):
