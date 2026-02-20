@@ -17,6 +17,11 @@ from rpy2.robjects import pandas2ri
 from rpy2.robjects.conversion import localconverter
 from rpy2.robjects.packages import importr
 import rpy2.rinterface_lib.callbacks as rcallbacks
+
+# Suppress all R console warnings/stderr from appearing in Python logs.
+# Actual R errors that matter still raise Python exceptions via rpy2.
+rcallbacks.consolewrite_warnerror = lambda message: None
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options
@@ -305,15 +310,55 @@ def _convert_large_integers_for_r(df: pd.DataFrame) -> pd.DataFrame:
 
 def _convert_datetime_columns_for_r(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert datetime columns to string (YYYY-MM-DD) so rpy2 pandas2ri does not fail on
-    timezone-aware datetimes (e.g. datetime.timezone has no .zone attribute).
+    Make datetime columns safe for rpy2 pandas2ri conversion.
+
+    Handles the following edge cases that would otherwise cause rpy2 errors:
+      - datetime.timezone objects (no .zone attribute) → convert to UTC
+      - timezone-naive datetimes → localize to UTC so rpy2 gets a proper tz
+      - empty series / NaT-only columns → left as-is (try/except catches errors)
+      - non-datetime columns → skipped
+    Named timezones like pytz.timezone('Asia/Kolkata') are left untouched.
     """
     df_out = df.copy()
     for col in df_out.columns:
         try:
-            if pd.api.types.is_datetime64_any_dtype(df_out[col]):
-                # timezone-aware or -naive: format as date string to avoid rpy2 .zone error
-                df_out[col] = pd.to_datetime(df_out[col], utc=True).dt.strftime("%Y-%m-%d").astype("string")
+            if not pd.api.types.is_datetime64_any_dtype(df_out[col]):
+                continue
+            ser = pd.to_datetime(df_out[col])
+            # Skip all-NaT columns
+            if ser.isna().all():
+                continue
+            tz = ser.dt.tz
+            if tz is None:
+                # Naive datetimes – localize to UTC so rpy2 has a named tz
+                df_out[col] = ser.dt.tz_localize("UTC")
+            elif not hasattr(tz, "zone"):
+                # bare datetime.timezone (e.g. datetime.timezone.utc) – no .zone attr
+                df_out[col] = ser.dt.tz_convert("UTC")
+            else:
+                # Named tz (pytz / zoneinfo) – rpy2 handles these fine
+                # For date-only columns: normalize times to midnight
+                # Check if all times are at 00:00:00 or 18:30:00 (date-only data, possibly with old bug)
+                hours = ser.dt.hour
+                minutes = ser.dt.minute
+                seconds = ser.dt.second
+                # For "date" columns (daily OHLC data): normalize times to midnight
+                # Check if all times are at 00:00:00 or 18:30:00 (old bug artifact from R UTC conversion)
+                # Only apply this normalization to columns named "date" to avoid affecting legitimate datetime columns
+                if col == "date" or col.endswith("_date"):
+                    # Check: all hours are 0 or 18, all minutes are 0 or 30, all seconds are 0
+                    is_date_only = (
+                        hours.isin([0, 18]).all() and
+                        minutes.isin([0, 30]).all() and
+                        (seconds == 0).all()
+                    )
+                    if is_date_only:
+                        # Normalize to midnight in the current timezone
+                        df_out[col] = ser.dt.normalize()
+                    else:
+                        df_out[col] = ser
+                else:
+                    df_out[col] = ser
         except (TypeError, ValueError, AttributeError):
             pass
     return df_out
@@ -471,6 +516,65 @@ def _apply_smart_conversion(df: pd.DataFrame, col: str) -> None:
             df[col] = df[col].astype(str).astype("string")
 
 
+def _log_r_warnings_buffer(base, path: str, operation: str, max_log: int = 100) -> None:
+    """
+    Call R's warnings() and log the returned messages (e.g. when R reported "50 or more warnings").
+    Uses as.character(warnings()) in R so we always get a character vector; handles NULL/empty.
+    """
+    try:
+        # R's warnings() returns warningList/simpleWarning; as.character() gives a string vector (or character(0) if NULL)
+        r_char = ro.r("as.character(warnings())")
+        warnings_list = [str(x) for x in r_char] if r_char is not None else []
+        if not warnings_list:
+            return
+        n = len(warnings_list)
+        for i in range(min(n, max_log)):
+            w = warnings_list[i]
+            get_chameli_logger().log_warning(
+                f"R warnings()[{i+1}]: {w}",
+                {"file_path": path, "operation": operation, "warning_index": i + 1},
+            )
+        if n > max_log:
+            get_chameli_logger().log_warning(
+                f"R warnings(): {n - max_log} more not shown",
+                {"file_path": path, "operation": operation, "total_warnings": n},
+            )
+    except Exception as e:
+        get_chameli_logger().log_warning(
+            f"Could not retrieve R warnings(): {e}",
+            {"file_path": path, "operation": operation, "error": str(e)},
+        )
+
+
+def _flush_r_warnings(path: str, operation: str, max_log: int = 100) -> None:
+    """
+    Flush R's warning buffer: log any accumulated warnings, then clear the buffer.
+    Call this after each R operation (e.g. saveRDS) so warnings are captured per-file
+    instead of accumulating across thousands of calls and getting lost at session end.
+    """
+    try:
+        r_char = ro.r("as.character(warnings())")
+        warnings_list = [str(x) for x in r_char] if r_char is not None else []
+        if warnings_list:
+            n = len(warnings_list)
+            for i in range(min(n, max_log)):
+                get_chameli_logger().log_warning(
+                    f"R warnings()[{i+1}]: {warnings_list[i]}",
+                    {"file_path": path, "operation": operation, "warning_index": i + 1},
+                )
+            if n > max_log:
+                get_chameli_logger().log_warning(
+                    f"R warnings(): {n - max_log} more not shown",
+                    {"file_path": path, "operation": operation, "total_warnings": n},
+                )
+        ro.r("assign('last.warning', NULL, envir = baseenv())")
+    except Exception as e:
+        get_chameli_logger().log_warning(
+            f"Could not flush R warnings: {e}",
+            {"file_path": path, "operation": operation, "error": str(e)},
+        )
+
+
 def saveRDS(pd_file, path):
     """
     Save a pandas DataFrame to an RDS file locally or on a remote server.
@@ -491,47 +595,23 @@ def saveRDS(pd_file, path):
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 local_temp_file = temp_file.name
 
-            # Set up warning capture for R operations
-            warnings_collected = []
-            original_warn_callback = rcallbacks.consolewrite_warnerror
+            # Pre-process DataFrame to ensure proper NA handling for stock extras data
+            string_columns = ["symbol", "update_date", "circuit_band", "basic_industry", "industry", "sector"]
+            numeric_columns = {
+                "outstanding_shares": "Int64",
+                "free_float_shares": "Int64",
+                "price": "Float64"
+            }
+            pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
+            pd_file = _convert_large_integers_for_r(pd_file)
+            pd_file = _convert_datetime_columns_for_r(pd_file)
 
-            def collect_warnings(message):
-                warnings_collected.append(str(message))
+            # Save the RDS file locally first
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                r_from_pd_df = ro.conversion.py2rpy(pd_file)
+            base.saveRDS(r_from_pd_df, local_temp_file, version=2)
 
-            rcallbacks.consolewrite_warnerror = collect_warnings
-
-            try:
-                # Pre-process DataFrame to ensure proper NA handling for stock extras data
-                string_columns = ["symbol", "update_date", "circuit_band", "basic_industry", "industry", "sector"]
-                numeric_columns = {
-                    "outstanding_shares": "Int64",
-                    "free_float_shares": "Int64",
-                    "price": "Float64"
-                }
-                pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
-                pd_file = _convert_large_integers_for_r(pd_file)
-                pd_file = _convert_datetime_columns_for_r(pd_file)
-
-                # Save the RDS file locally first
-                with localconverter(ro.default_converter + pandas2ri.converter):
-                    r_from_pd_df = ro.conversion.py2rpy(pd_file)
-                base.saveRDS(r_from_pd_df, local_temp_file, version=2)
-
-                # Log any R warnings that were generated
-                if warnings_collected:
-                    for i, warning in enumerate(warnings_collected[:50]):  # Show first 50 as R does
-                        get_chameli_logger().log_warning(
-                            f"R warning {i+1}: {warning}",
-                            {"file_path": path, "operation": "save_remote", "warning_index": i+1}
-                        )
-                    if len(warnings_collected) > 50:
-                        get_chameli_logger().log_warning(
-                            f"Additional {len(warnings_collected) - 50} R warnings not shown",
-                            {"file_path": path, "operation": "save_remote", "total_warnings": len(warnings_collected)}
-                        )
-            finally:
-                # Restore original warning callback
-                rcallbacks.consolewrite_warnerror = original_warn_callback
+            _flush_r_warnings(path, "save_remote")
 
             # Upload the file to the remote server
             transport = remote_connection.get_transport()
@@ -554,51 +634,27 @@ def saveRDS(pd_file, path):
                 os.remove(local_temp_file)
     else:
         try:
-            # Set up warning capture for R operations
-            warnings_collected = []
-            original_warn_callback = rcallbacks.consolewrite_warnerror
+            # Pre-process DataFrame to ensure proper NA handling for stock extras data
+            string_columns = ["symbol", "update_date", "circuit_band", "basic_industry", "industry", "sector"]
+            numeric_columns = {
+                "outstanding_shares": "Int64",
+                "free_float_shares": "Int64",
+                "price": "Float64"
+            }
+            pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
+            pd_file = _convert_large_integers_for_r(pd_file)
+            pd_file = _convert_datetime_columns_for_r(pd_file)
 
-            def collect_warnings(message):
-                warnings_collected.append(str(message))
+            # Save the RDS file locally
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                r_from_pd_df = ro.conversion.py2rpy(pd_file)
+            base.saveRDS(r_from_pd_df, path, version=2)
 
-            rcallbacks.consolewrite_warnerror = collect_warnings
+            _flush_r_warnings(path, "save_local")
 
-            try:
-                # Pre-process DataFrame to ensure proper NA handling for stock extras data
-                string_columns = ["symbol", "update_date", "circuit_band", "basic_industry", "industry", "sector"]
-                numeric_columns = {
-                    "outstanding_shares": "Int64",
-                    "free_float_shares": "Int64",
-                    "price": "Float64"
-                }
-                pd_file = preprocess_dataframe_for_r(pd_file, string_columns, numeric_columns)
-                pd_file = _convert_large_integers_for_r(pd_file)
-                pd_file = _convert_datetime_columns_for_r(pd_file)
-
-                # Save the RDS file locally
-                with localconverter(ro.default_converter + pandas2ri.converter):
-                    r_from_pd_df = ro.conversion.py2rpy(pd_file)
-                base.saveRDS(r_from_pd_df, path, version=2)
-
-                # Log any R warnings that were generated
-                if warnings_collected:
-                    for i, warning in enumerate(warnings_collected[:50]):  # Show first 50 as R does
-                        get_chameli_logger().log_warning(
-                            f"R warning {i+1}: {warning}",
-                            {"file_path": path, "operation": "save_local", "warning_index": i+1}
-                        )
-                    if len(warnings_collected) > 50:
-                        get_chameli_logger().log_warning(
-                            f"Additional {len(warnings_collected) - 50} R warnings not shown",
-                            {"file_path": path, "operation": "save_local", "total_warnings": len(warnings_collected)}
-                        )
-
-                get_chameli_logger().log_info(
-                    f"RDS file successfully saved locally: {path}", {"file_path": path, "operation": "save_local"}
-                )
-            finally:
-                # Restore original warning callback
-                rcallbacks.consolewrite_warnerror = original_warn_callback
+            get_chameli_logger().log_info(
+                f"RDS file successfully saved locally: {path}", {"file_path": path, "operation": "save_local"}
+            )
         except Exception as e:
             get_chameli_logger().log_error(
                 "Failed to save RDS file locally", e, {"file_path": path, "operation": "save_local"}

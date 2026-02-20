@@ -56,7 +56,7 @@ Below is a list of available functions in each module. For detailed usage, use t
 
 ### `interactions` Module
 - `readRDS(filename)`
-- `saveRDS(pd_file, path)`
+- `saveRDS(pd_file, path, timezone="Asia/Kolkata")`
 - `send_mail(send_from, send_to, password, subject, text, files=None, is_html=False)`
 - `get_session_or_driver(url_to_test, get_session=True, headless=False, desktop_session=4, proxy_source=None, api_key=None, proxy_user=None, proxy_password=None, country_code=None, webdriver_path=None)`
 
