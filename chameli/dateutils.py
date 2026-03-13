@@ -839,8 +839,7 @@ def get_naive_dt(datetime_: Union[dt.datetime, pd.Timestamp]) -> Union[dt.dateti
             return datetime_
     elif isinstance(datetime_, pd.Timestamp):
         if is_aware(datetime_):
-            datetime_ = datetime_.tz = None
-            return datetime_
+            return datetime_.tz_localize(None)
         else:
             return datetime_
     else:

@@ -4,6 +4,7 @@ import math
 import sys
 import traceback
 from collections import OrderedDict
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -383,9 +384,8 @@ def BlackScholesIV(
     """Calculate Black-Scholes Implied Volatility (IV) using Brent's Method (Failsafe)"""
 
     if S <= 0 or X <= 0 or T <= 0 or math.isnan(OptionPrice):
-        get_chameli_logger().log_error(
+        get_chameli_logger().log_debug(
             f"Invalid Inputs: underlying: {S}, strike: {X}, years to maturity: {T}, option type: {OptionType}, option Price: {OptionPrice}",
-            None,
             {
                 "underlying": S,
                 "strike": X,
@@ -710,8 +710,7 @@ def performance_attribution(
         expiry_cutoff_minutes (int): Minutes before market close for sale vol rule (default 15)
         purchase_expiry_vol (float): Vol to use for purchase combos at/after market close on expiry (default 0.05)
     """
-    t0 = apply_timezone(t0, exchange)
-    t1 = apply_timezone(t1, exchange)
+    # t0, t1 are naive (exchange local); keep them naive for all comparisons
     legs = _parse_combo_symbol(combo_symbol)
 
     def get_intrinsic_value(symbol, spot_price):
@@ -731,12 +730,11 @@ def performance_attribution(
         except Exception:
             return None
 
-    def is_on_expiry_and_after_cutoff(symbol, t1, exchange):
+    def is_on_expiry_and_after_cutoff(symbol, t1):
         expiry_dt = get_expiry_datetime(symbol)
         if expiry_dt is None:
             return False
-        expiry_dt = apply_timezone(expiry_dt, exchange)
-        # Calculate cutoff time
+        # expiry_dt is naive (same as t1); no apply_timezone
         cutoff_dt = expiry_dt - dt.timedelta(minutes=expiry_cutoff_minutes)
         return t1.date() == expiry_dt.date() and t1 >= cutoff_dt
 
@@ -786,7 +784,7 @@ def performance_attribution(
         iv_t1 = max(ivs_t1.get(symbol, 0), 0.001)
         expiry_dt = get_expiry_datetime(symbol)
         exit_iv = iv_t1
-        if combo_type == "sale" and is_on_expiry_and_after_cutoff(symbol, t1, exchange):
+        if combo_type == "sale" and is_on_expiry_and_after_cutoff(symbol, t1):
             exit_iv = iv_t0
         elif combo_type == "purchase" and is_on_expiry_and_after_close(symbol, t1):
             exit_iv = purchase_expiry_vol
@@ -846,6 +844,291 @@ def performance_attribution(
         "combo_type": combo_type,
         "net_premium": net_premium,
     }
+
+
+# =============================================================================
+# Attribution helpers and trade-level attribution (for scalping / pnl_common)
+# =============================================================================
+
+
+def get_underlying_symbol(symbol: str) -> str:
+    """Underlying symbol for option/future (e.g. NIFTY_OPT_... -> NIFTY_IND___)."""
+    if "_OPT_" in symbol:
+        base = symbol.split("_OPT_")[0]
+    elif "_FUT_" in symbol:
+        base = symbol.split("_FUT_")[0]
+    else:
+        return symbol
+    if "NIFTY" in base or "SENSEX" in base:
+        return base + "_IND___"
+    return base + "_STK___"
+
+
+def get_exchange_for_symbol(symbol: str) -> str:
+    """Exchange for symbol (BSE if SENSEX, else NSE)."""
+    return "BSE" if "SENSEX" in symbol else "NSE"
+
+
+def is_futures_symbol(symbol: str) -> bool:
+    return "_FUT_" in symbol
+
+
+def is_options_symbol(symbol: str) -> bool:
+    return "_OPT_" in symbol
+
+
+def is_stock_symbol(symbol: str) -> bool:
+    return "_STK_" in symbol
+
+
+def get_iv_for_symbol(
+    symbol: str,
+    price: float,
+    spot: float,
+    time: dt.datetime,
+    exchange: str,
+) -> Optional[float]:
+    """Implied volatility for an option symbol (uses calc_greeks). Returns None if unavailable."""
+    try:
+        if "_OPT_" in symbol:
+            expiry_str = symbol.split("_")[2]
+            expiry_dt = dt.datetime.strptime(expiry_str + " 15:30:00", "%Y%m%d %H:%M:%S")
+            if time >= expiry_dt:
+                return 0.0
+    except Exception:
+        pass
+    try:
+        greeks = calc_greeks(
+            long_symbol=symbol,
+            opt_price=price,
+            underlying=spot,
+            calc_time=time,
+            greeks=["vol"],
+            risk_free_rate=0,
+            exchange=exchange,
+        )
+        if isinstance(greeks, dict):
+            return greeks.get("vol", None)
+        return greeks
+    except Exception:
+        return None
+
+
+def _attrib_spot(
+    symbol: str,
+    entry_price: float,
+    exit_price: float,
+    entry_time: dt.datetime,
+    exit_time: dt.datetime,
+    quantity: float,
+    get_spot_price_fn: Callable[[str, str, dt.datetime], Optional[float]],
+) -> float:
+    """Spot attribution for stocks/futures. Options use performance_attribution."""
+    try:
+        if is_stock_symbol(symbol):
+            return (exit_price - entry_price) * quantity
+        if is_futures_symbol(symbol):
+            underlying_symbol = get_underlying_symbol(symbol)
+            exchange = get_exchange_for_symbol(symbol)
+            spot_t0 = get_spot_price_fn(underlying_symbol, exchange, entry_time)
+            spot_t1 = get_spot_price_fn(underlying_symbol, exchange, exit_time)
+            if spot_t0 is None or spot_t1 is None:
+                return 0.0
+            return (spot_t1 - spot_t0) * quantity
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def _attrib_spread(
+    symbol: str,
+    entry_price: float,
+    exit_price: float,
+    entry_time: dt.datetime,
+    exit_time: dt.datetime,
+    quantity: float,
+    get_spot_price_fn: Callable[[str, str, dt.datetime], Optional[float]],
+) -> float:
+    """Spread attribution for futures (spread = fut - spot)."""
+    if not is_futures_symbol(symbol):
+        return 0.0
+    try:
+        underlying_symbol = get_underlying_symbol(symbol)
+        exchange = get_exchange_for_symbol(symbol)
+        spot_t0 = get_spot_price_fn(underlying_symbol, exchange, entry_time)
+        spot_t1 = get_spot_price_fn(underlying_symbol, exchange, exit_time)
+        if spot_t0 is None or spot_t1 is None:
+            return 0.0
+        spread_t0 = entry_price - spot_t0
+        spread_t1 = exit_price - spot_t1
+        return (spread_t1 - spread_t0) * quantity
+    except Exception:
+        return 0.0
+
+
+def calculate_attribution_for_trade(
+    row: pd.Series,
+    get_spot_price_fn: Callable[[str, str, dt.datetime], Optional[float]],
+    get_iv_fn: Optional[
+        Callable[[str, float, float, dt.datetime, str], Optional[float]]
+    ] = None,
+    current_time: Optional[dt.datetime] = None,
+    get_leg_price_fn: Optional[Callable[[str, str], Optional[float]]] = None,
+) -> Dict[str, float]:
+    """
+    Attribution for a single trade (spot, vol, timedecay, spread).
+    Caller provides get_spot_price_fn; get_iv_fn defaults to get_iv_for_symbol.
+    Used by scalping for vol-attrib exit and by pnl_common.
+    """
+    result = {
+        "spot_attrib": 0.0,
+        "vol_attrib": 0.0,
+        "timedecay_attrib": 0.0,
+        "spread_attrib": 0.0,
+    }
+    if current_time is None:
+        current_time = dt.datetime.now()
+    if get_iv_fn is None:
+        get_iv_fn = get_iv_for_symbol
+    try:
+        combo_symbol = row["symbol"]
+        entry_time = pd.to_datetime(row["entry_time"])
+        exit_time_str = row.get("exit_time", "")
+        if exit_time_str == "" or exit_time_str == "0" or pd.isna(exit_time_str):
+            exit_time = current_time
+        else:
+            exit_time = pd.to_datetime(exit_time_str)
+        market_close = exit_time.replace(hour=15, minute=30, second=0, microsecond=0)
+        if exit_time > market_close:
+            exit_time = market_close
+        legs = _parse_combo_symbol(combo_symbol)
+        if len(legs) == 0:
+            return result
+        has_stocks = any(is_stock_symbol(leg) for leg in legs)
+        has_futures = any(is_futures_symbol(leg) for leg in legs)
+        has_options = any(is_options_symbol(leg) for leg in legs)
+        entry_price = row.get("entry_price", 0.0)
+        exit_price = row.get("exit_price", 0.0)
+        if exit_price == 0 or exit_price is None:
+            exit_price = row.get("mtm", entry_price)
+        entry_qty = row["entry_quantity"]
+
+        if has_stocks and not has_futures and not has_options:
+            for leg_symbol, leg_qty in legs.items():
+                if is_stock_symbol(leg_symbol):
+                    signed_qty = leg_qty * float(entry_qty)
+                    result["spot_attrib"] += _attrib_spot(
+                        leg_symbol, entry_price, exit_price,
+                        entry_time, exit_time, signed_qty, get_spot_price_fn,
+                    )
+            return result
+
+        if has_futures and not has_options:
+            for leg_symbol, leg_qty in legs.items():
+                if is_futures_symbol(leg_symbol):
+                    signed_qty = leg_qty * float(entry_qty)
+                    result["spot_attrib"] += _attrib_spot(
+                        leg_symbol, entry_price, exit_price,
+                        entry_time, exit_time, signed_qty, get_spot_price_fn,
+                    )
+                    result["spread_attrib"] += _attrib_spread(
+                        leg_symbol, entry_price, exit_price,
+                        entry_time, exit_time, signed_qty, get_spot_price_fn,
+                    )
+            return result
+
+        if has_options:
+            if len(legs) == 1:
+                leg_symbol = next(iter(legs.keys()))
+                leg_qty = legs[leg_symbol]
+                signed_qty = int(leg_qty * float(entry_qty))
+                combo_symbol_str = f"{leg_symbol}?{signed_qty}"
+                underlying_symbol = get_underlying_symbol(leg_symbol)
+                exchange = get_exchange_for_symbol(leg_symbol)
+                spot_t0 = get_spot_price_fn(underlying_symbol, exchange, entry_time)
+                spot_t1 = get_spot_price_fn(underlying_symbol, exchange, exit_time)
+                if spot_t0 is None or spot_t1 is None:
+                    return result
+                iv_t0 = get_iv_fn(leg_symbol, entry_price, spot_t0, entry_time, exchange)
+                iv_t1 = get_iv_fn(leg_symbol, exit_price, spot_t1, exit_time, exchange)
+                if iv_t0 is None or iv_t1 is None:
+                    return result
+                try:
+                    attrib = performance_attribution(
+                        combo_symbol=combo_symbol_str,
+                        spot_t0=spot_t0,
+                        spot_t1=spot_t1,
+                        ivs_t0={leg_symbol: iv_t0},
+                        ivs_t1={leg_symbol: iv_t1},
+                        t0=entry_time,
+                        t1=exit_time,
+                        r=0,
+                        exchange=exchange,
+                    )
+                    result["spot_attrib"] = 0.0 if pd.isna(attrib.get("underlying_attrib", 0.0)) else attrib["underlying_attrib"]
+                    result["vol_attrib"] = 0.0 if pd.isna(attrib.get("vol_attrib", 0.0)) else attrib["vol_attrib"]
+                    result["timedecay_attrib"] = 0.0 if pd.isna(attrib.get("timedecay_attrib", 0.0)) else attrib["timedecay_attrib"]
+                except Exception:
+                    pass
+                return result
+
+            # Multi-leg option combo
+            adjusted_legs = {leg_symbol: int(leg_qty * float(entry_qty)) for leg_symbol, leg_qty in legs.items()}
+            spot_t0_dict = {}
+            spot_t1_dict = {}
+            ivs_t0 = {}
+            ivs_t1 = {}
+            for leg_symbol in legs:
+                underlying_symbol = get_underlying_symbol(leg_symbol)
+                exchange_leg = get_exchange_for_symbol(leg_symbol)
+                spot_t0 = get_spot_price_fn(underlying_symbol, exchange_leg, entry_time)
+                spot_t1 = get_spot_price_fn(underlying_symbol, exchange_leg, exit_time)
+                if spot_t0 is None or spot_t1 is None:
+                    return result
+                spot_t0_dict[leg_symbol] = spot_t0
+                spot_t1_dict[leg_symbol] = spot_t1
+                leg_entry_price = None
+                leg_exit_price = None
+                if get_leg_price_fn is not None:
+                    try:
+                        leg_entry_price = get_leg_price_fn(leg_symbol, "entry")
+                        leg_exit_price = get_leg_price_fn(leg_symbol, "exit")
+                    except Exception:
+                        pass
+                if leg_entry_price is None:
+                    return result
+                if leg_exit_price is None:
+                    return result
+                iv_0 = get_iv_fn(leg_symbol, leg_entry_price, spot_t0, entry_time, exchange_leg)
+                iv_1 = get_iv_fn(leg_symbol, leg_exit_price, spot_t1, exit_time, exchange_leg)
+                if iv_0 is None or iv_1 is None:
+                    return result
+                ivs_t0[leg_symbol] = iv_0
+                ivs_t1[leg_symbol] = iv_1
+            combo_parts = [f"{leg}?{qty}" for leg, qty in adjusted_legs.items()]
+            combo_symbol_str = ":".join(combo_parts)
+            first_leg = next(iter(legs.keys()))
+            exchange = get_exchange_for_symbol(first_leg)
+            try:
+                attrib = performance_attribution(
+                    combo_symbol=combo_symbol_str,
+                    spot_t0=spot_t0_dict[first_leg],
+                    spot_t1=spot_t1_dict[first_leg],
+                    ivs_t0=ivs_t0,
+                    ivs_t1=ivs_t1,
+                    t0=entry_time,
+                    t1=exit_time,
+                    r=0,
+                    exchange=exchange,
+                )
+                result["spot_attrib"] = 0.0 if pd.isna(attrib.get("underlying_attrib", 0.0)) else attrib["underlying_attrib"]
+                result["vol_attrib"] = 0.0 if pd.isna(attrib.get("vol_attrib", 0.0)) else attrib["vol_attrib"]
+                result["timedecay_attrib"] = 0.0 if pd.isna(attrib.get("timedecay_attrib", 0.0)) else attrib["timedecay_attrib"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return result
 
 
 # Helper functions you'll need to implement based on your system:
