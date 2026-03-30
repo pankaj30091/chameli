@@ -1235,9 +1235,15 @@ class MitmProxyServer:
                             {"method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.request"}
                         )
                 
+                _IGNORED_PROXY_HOSTS = frozenset({
+                    "firefox-settings-attachments.cdn.mozilla.net",
+                    "content-signature-2.cdn.mozilla.net",
+                })
+
                 def response(self, flow: http.HTTPFlow) -> None:
-                    # Only log errors (non-2xx status codes)
                     if flow.response.status_code >= 400:
+                        if flow.request.pretty_host in self._IGNORED_PROXY_HOSTS:
+                            return
                         get_chameli_logger().log_warning(
                             f"Proxy error response: {flow.response.status_code} for {flow.request.pretty_url}",
                             {"status_code": flow.response.status_code, "method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.response"}
