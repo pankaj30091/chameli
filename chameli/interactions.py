@@ -37,6 +37,7 @@ import threading
 import socket
 import base64
 import time
+import random
 from urllib.parse import urlparse, quote
 from mitmproxy import options
 from mitmproxy.tools.dump import DumpMaster
@@ -1129,11 +1130,12 @@ headers = {
 class MitmProxyServer:
     """Manages a local mitmproxy server that forwards to upstream proxy with authentication"""
 
-    def __init__(self, upstream_proxy, proxy_user, proxy_pass, local_port=8080):
+    def __init__(self, upstream_proxy, proxy_user, proxy_pass, local_port=8080, upstream_scheme="https"):
         self.upstream_proxy = upstream_proxy
         self.proxy_user = proxy_user
         self.proxy_pass = proxy_pass
         self.local_port = local_port
+        self.upstream_scheme = upstream_scheme
         self.master = None
         self.server_thread = None
         self.running = False
@@ -1190,8 +1192,10 @@ class MitmProxyServer:
             
             # Set upstream proxy (without auth in URL - handle auth via addon)
             upstream_host, upstream_port = self.upstream_proxy.split(':')
-            upstream_url = f"http://{upstream_host}:{upstream_port}"
+            upstream_url = f"{self.upstream_scheme}://{upstream_host}:{upstream_port}"
             opts.mode = [f"upstream:{upstream_url}"]
+            if self.upstream_scheme == "https":
+                opts.ssl_insecure = True
             
             # Set upstream proxy authentication via options (if supported)
             # Note: mitmproxy doesn't directly support upstream_auth in options,
@@ -1405,11 +1409,77 @@ LocalProxyServer = MitmProxyServer
 
 
 def cleanup_proxy_server():
-    """Stop the active proxy server if running"""
+    """Stop the legacy global proxy server if running.
+
+    Proxy servers are now per-driver-instance (stopped automatically via driver.quit()).
+    This function remains for backward compatibility only.
+    """
     global _active_proxy_server
     if _active_proxy_server:
         _active_proxy_server.stop()
         _active_proxy_server = None
+
+
+NORDVPN_COUNTRY_IDS = {
+    "IN": 100, "US": 228, "GB": 227, "DE": 81, "FR": 74, "CA": 38,
+    "AU": 13, "JP": 114, "SG": 195, "NL": 153, "SE": 208, "CH": 209,
+    "IT": 106, "ES": 202, "BR": 30, "KR": 119, "HK": 97, "AE": 225,
+}
+
+
+def get_nordvpn_proxies(country_code="IN", max_proxies=5):
+    """Fetch NordVPN proxy server hostnames for a given country via the NordVPN API.
+
+    Returns a list of "hostname:port" strings using NordVPN's HTTP proxy (port 89).
+    """
+    cc = country_code.upper() if country_code else "IN"
+    country_id = NORDVPN_COUNTRY_IDS.get(cc)
+    if country_id is None:
+        raise ValueError(
+            f"Unsupported NordVPN country code '{cc}'. "
+            f"Supported: {', '.join(sorted(NORDVPN_COUNTRY_IDS))}"
+        )
+
+    api_url = (
+        f"https://api.nordvpn.com/v1/servers/recommendations"
+        f"?filters[country_id]={country_id}"
+        f"&filters[servers_technologies][identifier]=proxy_ssl"
+        f"&limit={max_proxies}"
+    )
+    try:
+        resp = requests.get(api_url, timeout=10)
+        resp.raise_for_status()
+        servers = resp.json()
+    except Exception as e:
+        get_chameli_logger().log_error(
+            f"Failed to fetch NordVPN servers: {e}", e,
+            {"country_code": cc, "function": "get_nordvpn_proxies"}
+        )
+        raise
+
+    proxies = []
+    for s in servers:
+        proxy_host = None
+        for tech in s.get("technologies", []):
+            if tech.get("identifier") == "proxy_ssl":
+                for meta in tech.get("metadata", []):
+                    if meta.get("name") == "proxy_hostname":
+                        proxy_host = meta["value"]
+                        break
+                break
+        if not proxy_host:
+            proxy_host = s.get("hostname", "").replace(".nordvpn.com", ".proxy.nordvpn.com")
+        if proxy_host:
+            proxies.append(f"{proxy_host}:89")
+    if not proxies:
+        raise ValueError(f"No NordVPN proxy servers found for country '{cc}'")
+
+    random.shuffle(proxies)
+    get_chameli_logger().log_info(
+        f"Fetched {len(proxies)} NordVPN proxy server(s) for {cc}",
+        {"proxies": proxies, "function": "get_nordvpn_proxies"}
+    )
+    return proxies
 
 
 def get_session_or_driver(
@@ -1439,7 +1509,7 @@ def get_session_or_driver(
         get_session (bool, optional): If True, return a `requests.Session` object; otherwise, return a WebDriver instance. Defaults to True.
         headless (bool, optional): If True, run the WebDriver in headless mode. Defaults to False.
         desktop_session (int, optional): The desktop session number for display when not in headless mode. Defaults to 4.
-        proxy_source (str, optional): The source of proxies to use. Options include "webshare" or "sslhosts". Defaults to None.
+        proxy_source (str, optional): The source of proxies to use. Options include "nordvpn", "webshare", or "sslhosts". Defaults to None.
         api_key (str, optional): API key for accessing proxy services like Webshare. Required if `proxy_source` is "webshare". Defaults to None.
         proxy_user (str, optional): Username for proxy authentication. Defaults to None.
         proxy_password (str, optional): Password for proxy authentication. Defaults to None.
@@ -1453,6 +1523,9 @@ def get_session_or_driver(
         Exception: If there are issues with proxy configuration, WebDriver setup, or fetching proxies.
 
     Notes:
+        - If `proxy_source` is "nordvpn", fetches proxy servers from the NordVPN API for the given country.
+          Uses NordVPN service credentials (proxy_user/proxy_password) — not your account login.
+          Each driver gets its own isolated mitmproxy instance; no other browser/process is affected.
         - If `proxy_source` is "webshare", the function fetches proxies from the Webshare API.
         - If `proxy_source` is "sslhosts", the function scrapes proxies from sslproxies.org using Selenium.
         - The function validates proxies by testing them against the provided `url_to_test`.
@@ -1474,203 +1547,115 @@ def get_session_or_driver(
     def setup_driver_with_proxy_auth(proxy=None, proxy_user=None, proxy_pass=None):
         proxy_ip = None
         proxy_port = None
+        instance_proxy_server = None
         if proxy:
             proxy_ip, proxy_port = proxy.split(":")
 
-        # Configure Firefox options
         options = Options()
-        options.set_preference("network.proxy.type", 1)  # Manual proxy config
+        options.set_preference("network.proxy.type", 1)
         options.set_preference(
             "general.useragent.override",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.5993.70 Safari/537.36",
         )
 
         if proxy_ip is not None and proxy_port is not None:
-            # Use local proxy server if credentials are provided
             if proxy_user is not None and proxy_pass is not None:
-                global _active_proxy_server
-                
-                # Track local port to reuse if we need to restart
-                local_port_to_use = 8080  # Default port
-
-                # Check if we need to restart proxy server (different upstream proxy or marked as failed)
-                if _active_proxy_server and _active_proxy_server.running:
-                    needs_restart = (
-                        _active_proxy_server.upstream_proxy != f"{proxy_ip}:{proxy_port}" or
-                        _active_proxy_server.proxy_user != proxy_user or
-                        _active_proxy_server.proxy_pass != proxy_pass or
-                        _active_proxy_server.needs_new_upstream
+                try:
+                    upstream_scheme = "https" if proxy_source and proxy_source.lower() == "nordvpn" else "http"
+                    instance_proxy_server = LocalProxyServer(
+                        upstream_proxy=f"{proxy_ip}:{proxy_port}",
+                        proxy_user=proxy_user,
+                        proxy_pass=proxy_pass,
+                        local_port=8080,
+                        upstream_scheme=upstream_scheme,
                     )
-                    
-                    if needs_restart:
-                        get_chameli_logger().log_info(
-                            f"Restarting proxy server with new upstream proxy (keeping same local port)",
-                            {
-                                "old_upstream": _active_proxy_server.upstream_proxy,
-                                "new_upstream": f"{proxy_ip}:{proxy_port}",
-                                "local_port": _active_proxy_server.local_port,
-                                "function": "setup_driver_with_proxy_auth"
-                            }
-                        )
-                        # Keep the same local port to avoid Firefox reconfiguration
-                        local_port_to_use = _active_proxy_server.local_port
-                        _active_proxy_server.stop()
-                        _active_proxy_server = None
-                        # Will create new server below with same local port
-                    else:
-                        # Reuse existing proxy server
-                        get_chameli_logger().log_info(
-                            f"Reusing existing local proxy server",
-                            {
-                                "upstream_proxy": f"{proxy_ip}:{proxy_port}",
-                                "local_proxy": f"127.0.0.1:{_active_proxy_server.local_port}",
-                                "function": "setup_driver_with_proxy_auth"
-                            }
-                        )
+                    instance_proxy_server.start()
+                    if not instance_proxy_server.running:
+                        raise Exception("Proxy server failed to start")
 
-                # Start local proxy server if not already running
-                if not _active_proxy_server or not _active_proxy_server.running:
+                    time.sleep(0.5)
+                    local_port = instance_proxy_server.local_port
+                    test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    test_sock.settimeout(2)
                     try:
-                        print(f"[DEBUG] Starting local proxy server for {proxy_ip}:{proxy_port} on port {local_port_to_use}")
-                        _active_proxy_server = LocalProxyServer(
-                            upstream_proxy=f"{proxy_ip}:{proxy_port}",
-                            proxy_user=proxy_user,
-                            proxy_pass=proxy_pass,
-                            local_port=local_port_to_use
-                        )
-                        _active_proxy_server.start()
-                        print(f"[DEBUG] Proxy server started, running={_active_proxy_server.running}")
-                        # Verify it's actually running
-                        if not _active_proxy_server.running:
-                            raise Exception("Proxy server failed to start")
-                        
-                        # Additional health check - verify proxy server is actually accepting connections
-                        import time
-                        time.sleep(0.3)  # Give it a moment to be ready
-                        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        test_sock.settimeout(1.0)
-                        try:
-                            result = test_sock.connect_ex(("127.0.0.1", 8080))
-                            test_sock.close()
-                            if result != 0:
-                                get_chameli_logger().log_warning(
-                                    f"Proxy server may not be accepting connections - connect_ex returned {result}",
-                                    {"local_port": 8080, "result": result, "function": "setup_driver_with_proxy_auth"}
-                                )
-                        except Exception as e:
-                            test_sock.close()
-                            get_chameli_logger().log_warning(
-                                f"Could not verify proxy server connection: {str(e)}",
-                                {"local_port": 8080, "error": str(e), "function": "setup_driver_with_proxy_auth"}
+                        result = test_sock.connect_ex(("127.0.0.1", local_port))
+                        test_sock.close()
+                        if result == 0:
+                            get_chameli_logger().log_info(
+                                f"Proxy server verified on port {local_port}",
+                                {"local_port": local_port, "function": "setup_driver_with_proxy_auth"}
                             )
-                        
-                        # Give the server a moment to be fully ready for connections
-                        import time
-                        time.sleep(0.5)
-                        
-                        # Test that the proxy server is actually accepting connections
-                        try:
-                            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            test_sock.settimeout(2)
-                            local_port = _active_proxy_server.local_port
-                            result = test_sock.connect_ex(("127.0.0.1", local_port))
-                            test_sock.close()
-                            if result == 0:
-                                get_chameli_logger().log_info(
-                                    f"Proxy server verified - accepting connections on port {local_port}",
-                                    {"local_port": local_port, "function": "setup_driver_with_proxy_auth"}
-                                )
-                            else:
-                                get_chameli_logger().log_warning(
-                                    f"Proxy server may not be accepting connections - connect_ex returned {result}",
-                                    {"local_port": local_port, "result": result, "function": "setup_driver_with_proxy_auth"}
-                                )
-                        except Exception as e:
+                        else:
                             get_chameli_logger().log_warning(
-                                f"Could not verify proxy server connection: {str(e)}",
-                                {"local_port": local_port if '_active_proxy_server' in locals() and _active_proxy_server else 8080, "error": str(e), "function": "setup_driver_with_proxy_auth"}
+                                f"Proxy server may not be accepting connections - connect_ex returned {result}",
+                                {"local_port": local_port, "result": result, "function": "setup_driver_with_proxy_auth"}
                             )
                     except Exception as e:
-                        print(f"[DEBUG] Failed to start proxy server: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-                        get_chameli_logger().log_error(
-                            f"Failed to start local proxy server: {str(e)}",
-                            e,
-                            {
-                                "upstream_proxy": f"{proxy_ip}:{proxy_port}",
-                                "local_port": 8080,
-                                "function": "setup_driver_with_proxy_auth"
-                            }
-                        )
-                        # Fall back to direct proxy (will show auth popup)
+                        test_sock.close()
                         get_chameli_logger().log_warning(
-                            "Falling back to direct proxy configuration (auth popup may appear)",
-                            {"upstream_proxy": f"{proxy_ip}:{proxy_port}", "function": "setup_driver_with_proxy_auth"}
+                            f"Could not verify proxy server connection: {str(e)}",
+                            {"local_port": local_port, "error": str(e), "function": "setup_driver_with_proxy_auth"}
                         )
-                        # Fall back to direct proxy configuration
-                        options.set_preference("network.proxy.type", 1)
-                        options.set_preference("network.proxy.http", proxy_ip)
-                        options.set_preference("network.proxy.http_port", int(proxy_port))
-                        options.set_preference("network.proxy.ssl", proxy_ip)
-                        options.set_preference("network.proxy.ssl_port", int(proxy_port))
-                        options.set_preference("network.proxy.no_proxies_on", "")
-                        options.set_preference("media.peerconnection.enabled", False)
-                        # Continue with driver creation - don't return here
+                except Exception as e:
+                    get_chameli_logger().log_error(
+                        f"Failed to start local proxy server: {str(e)}", e,
+                        {"upstream_proxy": f"{proxy_ip}:{proxy_port}", "function": "setup_driver_with_proxy_auth"}
+                    )
+                    get_chameli_logger().log_warning(
+                        "Falling back to direct proxy configuration (auth popup may appear)",
+                        {"upstream_proxy": f"{proxy_ip}:{proxy_port}", "function": "setup_driver_with_proxy_auth"}
+                    )
+                    instance_proxy_server = None
+                    options.set_preference("network.proxy.http", proxy_ip)
+                    options.set_preference("network.proxy.http_port", int(proxy_port))
+                    options.set_preference("network.proxy.ssl", proxy_ip)
+                    options.set_preference("network.proxy.ssl_port", int(proxy_port))
+                    options.set_preference("network.proxy.no_proxies_on", "")
+                    options.set_preference("media.peerconnection.enabled", False)
 
-                # Configure Firefox to use local proxy (no auth needed)
-                # Use the actual port from the proxy server (may be different from 8080 if port conflict)
-                actual_proxy_port = _active_proxy_server.local_port if _active_proxy_server else 8080
-                options.set_preference("network.proxy.type", 1)  # Manual proxy config
-                options.set_preference("network.proxy.http", "127.0.0.1")
-                options.set_preference("network.proxy.http_port", actual_proxy_port)
-                options.set_preference("network.proxy.ssl", "127.0.0.1")
-                options.set_preference("network.proxy.ssl_port", actual_proxy_port)
-                options.set_preference("network.proxy.ftp", "127.0.0.1")
-                options.set_preference("network.proxy.ftp_port", actual_proxy_port)
-                options.set_preference("network.proxy.socks", "")
-                options.set_preference("network.proxy.socks_port", 0)
-                options.set_preference("network.proxy.socks_version", 0)
-                options.set_preference("network.proxy.socks_remote_dns", False)
-                options.set_preference("network.proxy.no_proxies_on", "")  # No exclusions
-                options.set_preference("network.proxy.share_proxy_settings", True)
-                options.set_preference("network.proxy.allow_hijacking_localhost", True)  # Allow localhost proxies
-                options.set_preference("media.peerconnection.enabled", False)  # Disable WebRTC to prevent IP leaks
-                get_chameli_logger().log_info(
-                    f"Firefox proxy preferences configured",
-                    {"local_proxy": f"127.0.0.1:{actual_proxy_port}", "function": "setup_driver_with_proxy_auth"}
-                )
-
-                actual_proxy_port = _active_proxy_server.local_port if _active_proxy_server else 8080
-                get_chameli_logger().log_info(
-                    f"Using local proxy server for authentication",
-                    {
-                        "upstream_proxy": f"{proxy_ip}:{proxy_port}",
-                        "local_proxy": f"127.0.0.1:{actual_proxy_port}",
-                        "function": "setup_driver_with_proxy_auth"
-                    }
-                )
+                if instance_proxy_server and instance_proxy_server.running:
+                    actual_proxy_port = instance_proxy_server.local_port
+                    options.set_preference("network.proxy.type", 1)
+                    options.set_preference("network.proxy.http", "127.0.0.1")
+                    options.set_preference("network.proxy.http_port", actual_proxy_port)
+                    options.set_preference("network.proxy.ssl", "127.0.0.1")
+                    options.set_preference("network.proxy.ssl_port", actual_proxy_port)
+                    options.set_preference("network.proxy.ftp", "127.0.0.1")
+                    options.set_preference("network.proxy.ftp_port", actual_proxy_port)
+                    options.set_preference("network.proxy.socks", "")
+                    options.set_preference("network.proxy.socks_port", 0)
+                    options.set_preference("network.proxy.socks_version", 0)
+                    options.set_preference("network.proxy.socks_remote_dns", False)
+                    options.set_preference("network.proxy.no_proxies_on", "")
+                    options.set_preference("network.proxy.share_proxy_settings", True)
+                    options.set_preference("network.proxy.allow_hijacking_localhost", True)
+                    options.set_preference("media.peerconnection.enabled", False)
+                    get_chameli_logger().log_info(
+                        f"Firefox proxy preferences configured",
+                        {
+                            "upstream_proxy": f"{proxy_ip}:{proxy_port}",
+                            "local_proxy": f"127.0.0.1:{actual_proxy_port}",
+                            "function": "setup_driver_with_proxy_auth"
+                        }
+                    )
             else:
-                # No credentials, use proxy directly (will show popup)
-                options.set_preference("network.proxy.type", 1)  # Manual proxy config
                 options.set_preference("network.proxy.http", proxy_ip)
                 options.set_preference("network.proxy.http_port", int(proxy_port))
                 options.set_preference("network.proxy.ssl", proxy_ip)
                 options.set_preference("network.proxy.ssl_port", int(proxy_port))
-                options.set_preference("network.proxy.no_proxies_on", "")  # No exclusions
-                options.set_preference("media.peerconnection.enabled", False)  # Disable WebRTC to prevent IP leaks
-                
+                options.set_preference("network.proxy.no_proxies_on", "")
+                options.set_preference("media.peerconnection.enabled", False)
+
         if headless:
             options.add_argument("--headless")
         else:
             os.environ["DISPLAY"] = f":{str(desktop_session)}"
 
-        # Use the user-provided WebDriver path if available, otherwise fall back to the YAML config
         driver_path = webdriver_path if webdriver_path else get_dynamic_config().get("driver_path", "")
         if not isinstance(driver_path, str) or not driver_path:
             raise ValueError("A valid string path for GeckoDriver must be provided")
         service = Service(driver_path)
-        
+
         try:
             get_chameli_logger().log_info(
                 f"Creating Firefox driver with proxy configuration",
@@ -1682,14 +1667,25 @@ def get_session_or_driver(
                 {"function": "setup_driver_with_proxy_auth"}
             )
         except Exception as e:
+            if instance_proxy_server:
+                instance_proxy_server.stop()
             get_chameli_logger().log_error(
-                f"Failed to create Firefox driver: {str(e)}",
-                e,
+                f"Failed to create Firefox driver: {str(e)}", e,
                 {"driver_path": driver_path, "function": "setup_driver_with_proxy_auth"}
             )
             raise
 
-        # Inject headers using JavaScript (if needed)
+        if instance_proxy_server:
+            setattr(driver, "_chameli_proxy_server", instance_proxy_server)
+            original_quit = driver.quit
+            def _quit_with_cleanup(_orig=original_quit, _srv=instance_proxy_server):
+                try:
+                    _srv.stop()
+                except Exception:
+                    pass
+                _orig()
+            setattr(driver, "quit", _quit_with_cleanup)
+
         for key, value in headers.items():
             driver.execute_script(f"Object.defineProperty(navigator, '{key}', {{get: () => '{value}'}});")
         return driver
@@ -1699,17 +1695,29 @@ def get_session_or_driver(
         proxy_user=None,
         proxy_password=None,
     ):
+        # NordVPN *.proxy.nordvpn.com:89 is an SSL (HTTPS) proxy; plain http:// makes urllib3 send
+        # cleartext and the peer closes the connection (RemoteDisconnected / ProxyError).
+        is_nord = bool(proxy_source and str(proxy_source).lower() == "nordvpn")
+        scheme = "https" if is_nord else "http"
+
         if proxy_user and proxy_password:
-            proxy_url = f"http://{proxy_user}:{proxy_password}@{proxy}"
+            u = quote(str(proxy_user), safe="")
+            p = quote(str(proxy_password), safe="")
+            proxy_url = f"{scheme}://{u}:{p}@{proxy}"
             proxies = {"http": proxy_url, "https": proxy_url}
         elif proxy_source:
-            proxy_url = f"http://{proxy}"
+            proxy_url = f"{scheme}://{proxy}"
             proxies = {"http": proxy_url, "https": proxy_url}
         else:
             proxies = None
         s = requests.Session()
         if proxies:
             s.proxies.update(proxies)
+        if is_nord:
+            import urllib3
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            s.verify = False
         s.headers.update(headers)
         driver = setup_driver_with_proxy_auth(proxy, proxy_user, proxy_password)
         try:
@@ -1936,7 +1944,9 @@ def get_session_or_driver(
         proxies = fetch_proxies(country_code)
         return proxies
 
-    if proxy_source and proxy_source.lower() == "webshare":
+    if proxy_source and proxy_source.lower() == "nordvpn":
+        proxies = get_nordvpn_proxies(country_code=country_code or "IN")
+    elif proxy_source and proxy_source.lower() == "webshare":
         proxies = get_random_webshare_proxy(country_code=country_code)
     elif proxy_source and proxy_source.lower() == "sslhosts":
         proxies = get_free_proxy(country_code=country_code)
