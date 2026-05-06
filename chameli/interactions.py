@@ -1164,28 +1164,28 @@ class MitmProxyServer:
             return
 
         try:
-            # Try to find an available port if default port is busy
+            # Try to find an available local port if preferred port is busy.
             actual_port = self.local_port
-            if actual_port == 8080:  # Only check for default port
-                import socket
-                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_sock.settimeout(0.1)
-                if test_sock.connect_ex(("127.0.0.1", 8080)) == 0:
-                    # Port 8080 is in use, find alternative
-                    test_sock.close()
-                    alternative_port = self._find_available_port(8080, 10)
-                    if alternative_port:
-                        get_chameli_logger().log_warning(
-                            f"Port 8080 is in use, using alternative port {alternative_port}",
-                            {"original_port": 8080, "alternative_port": alternative_port, "function": "MitmProxyServer.start"}
-                        )
-                        actual_port = alternative_port
-                        self.local_port = alternative_port  # Update instance port
-                    else:
-                        test_sock.close()
-                        raise Exception("No available ports found (tried 8080-8089)")
+            import socket
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_sock.settimeout(0.1)
+            port_in_use = test_sock.connect_ex(("127.0.0.1", actual_port)) == 0
+            test_sock.close()
+            if port_in_use:
+                alternative_port = self._find_available_port(actual_port, 10)
+                if alternative_port:
+                    get_chameli_logger().log_info(
+                        f"Preferred local proxy port {actual_port} is busy; using {alternative_port}",
+                        {
+                            "preferred_port": actual_port,
+                            "selected_port": alternative_port,
+                            "function": "MitmProxyServer.start",
+                        },
+                    )
+                    actual_port = alternative_port
+                    self.local_port = alternative_port  # Update instance port
                 else:
-                    test_sock.close()
+                    raise Exception(f"No available local proxy ports found (tried {actual_port}-{actual_port + 9})")
             
             # Configure mitmproxy options
             opts = options.Options(listen_port=actual_port, listen_host="127.0.0.1")
