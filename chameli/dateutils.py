@@ -162,7 +162,7 @@ def format_datetime(dt_obj: Union[str, dt.datetime, dt.date, pd.Timestamp], patt
         dt_obj = parse_datetime(dt_obj)
     # Handle pandas Timestamp by converting to datetime
     elif isinstance(dt_obj, pd.Timestamp):
-        dt_obj = dt_obj.to_pydatetime()
+        dt_obj = dt_obj.floor("us").to_pydatetime()
 
     # Now handle the parsed datetime/date objects as before
     if isinstance(dt_obj, dt.datetime):
