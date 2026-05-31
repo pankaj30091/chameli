@@ -1138,8 +1138,37 @@ class MitmProxyServer:
         self.upstream_scheme = upstream_scheme
         self.master = None
         self.server_thread = None
+        self._loop = None
         self.running = False
         self.needs_new_upstream = False  # Flag to indicate upstream proxy needs to be changed
+
+    @staticmethod
+    def _cleanup_event_loop(loop):
+        """Cancel pending asyncio tasks and close the proxy thread's event loop."""
+        import asyncio
+
+        if loop is None or loop.is_closed():
+            return
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        try:
+            loop.close()
+        except Exception:
+            pass
+        try:
+            asyncio.set_event_loop(None)
+        except Exception:
+            pass
 
     def _find_available_port(self, start_port=8080, max_attempts=10):
         """Find an available port starting from start_port"""
@@ -1273,16 +1302,16 @@ class MitmProxyServer:
             captured_port = actual_port
             def run_proxy():
                 import asyncio
+
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
                 try:
                     get_chameli_logger().log_info(
                         f"Starting mitmproxy in thread",
                         {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                     )
-                    # Create a new event loop for this thread
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    # Create master - needs to be in async context for get_running_loop()
+
                     async def create_master():
                         get_chameli_logger().log_info(
                             f"Creating DumpMaster",
@@ -1295,23 +1324,17 @@ class MitmProxyServer:
                             {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
                         )
                         return self.master
-                    
-                    # Create master within event loop context
+
                     get_chameli_logger().log_info(
                         f"Starting event loop for mitmproxy",
                         {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                     )
                     try:
-                        # Create master in async context
                         master = loop.run_until_complete(create_master())
-                        # master.run() is synchronous but needs event loop running
-                        # We need to run it in a way that keeps the event loop alive
                         get_chameli_logger().log_info(
                             f"Calling master.run()",
                             {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                         )
-                        # Run the master - this is blocking and should start the server
-                        # The event loop is already set for this thread
                         loop.run_until_complete(master.run())
                     except Exception as e:
                         get_chameli_logger().log_error(
@@ -1322,7 +1345,6 @@ class MitmProxyServer:
                         raise
                 except Exception as e:
                     error_str = str(e)
-                    # Check if it's a port binding error
                     if "address already in use" in error_str.lower() or "errno 98" in error_str.lower():
                         get_chameli_logger().log_error(
                             f"Port binding error - port {captured_port} is already in use. Try cleaning up existing proxy servers.",
@@ -1336,6 +1358,10 @@ class MitmProxyServer:
                             {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                         )
                     raise
+                finally:
+                    self._cleanup_event_loop(loop)
+                    self._loop = None
+                    self.master = None
             
             # Start the thread with the event loop
             self.server_thread = threading.Thread(target=run_proxy, daemon=True)
@@ -1386,18 +1412,40 @@ class MitmProxyServer:
             )
             raise
 
-    def stop(self):
-        """Stop the mitmproxy server"""
-        if self.master and self.running:
-            try:
-                self.master.shutdown()
-            except:
-                pass
+    def stop(self, join_timeout=5.0):
+        """Stop the mitmproxy server and wait for its asyncio tasks to finish."""
+        thread = self.server_thread
+        if not self.master and not (thread and thread.is_alive()):
             self.running = False
-            get_chameli_logger().log_info(
-                f"mitmproxy server stopped",
-                {"local_port": self.local_port, "function": "MitmProxyServer.stop"}
-            )
+            return
+
+        master = self.master
+        if master:
+            try:
+                master.shutdown()
+            except Exception:
+                pass
+
+        if thread and thread.is_alive():
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                get_chameli_logger().log_warning(
+                    "mitmproxy server thread did not exit before join timeout",
+                    {
+                        "local_port": self.local_port,
+                        "join_timeout": join_timeout,
+                        "function": "MitmProxyServer.stop",
+                    },
+                )
+
+        self.master = None
+        self.server_thread = None
+        self._loop = None
+        self.running = False
+        get_chameli_logger().log_info(
+            f"mitmproxy server stopped",
+            {"local_port": self.local_port, "function": "MitmProxyServer.stop"}
+        )
 
     def get_local_proxy_url(self):
         """Get the local proxy URL for Firefox configuration"""
@@ -1721,7 +1769,11 @@ def get_session_or_driver(
         s.headers.update(headers)
         driver = setup_driver_with_proxy_auth(proxy, proxy_user, proxy_password)
         try:
-            driver.get(url_to_test)  # Navigate to the target URL
+            cookie_urls = [url_to_test]
+            if "nseindia.com" not in url_to_test:
+                cookie_urls.append("https://www.nseindia.com/option-chain")
+            for cookie_url in cookie_urls:
+                driver.get(cookie_url)
             cookies = driver.get_cookies()
             for cookie in cookies:
                 s.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain"))
@@ -1806,11 +1858,35 @@ def get_session_or_driver(
 
         # Test with requests
         def test_with_requests(proxy, proxy_user, proxy_password, default_timeout=default_timeout):
-            s = setup_session_with_proxy_auth(proxy, proxy_user, proxy_password)
-            response = s.get(test_url, timeout=default_timeout)
-            if response.status_code == 200:
-                return s
-            else:
+            try:
+                s = setup_session_with_proxy_auth(proxy, proxy_user, proxy_password)
+                response = s.get(test_url, timeout=default_timeout)
+                if response.status_code == 200:
+                    get_chameli_logger().log_info(
+                        f"Successfully tested proxy {proxy} with requests session",
+                        {"proxy": proxy, "test_url": test_url, "function": "test_with_requests"},
+                    )
+                    return s
+                get_chameli_logger().log_warning(
+                    f"Proxy {proxy} returned HTTP {response.status_code} for session test",
+                    {
+                        "proxy": proxy,
+                        "test_url": test_url,
+                        "status_code": response.status_code,
+                        "function": "test_with_requests",
+                    },
+                )
+                return None
+            except Exception as e:
+                get_chameli_logger().log_warning(
+                    f"Proxy session test failed for {proxy}: {e}",
+                    {
+                        "proxy": proxy,
+                        "test_url": test_url,
+                        "error_type": type(e).__name__,
+                        "function": "test_with_requests",
+                    },
+                )
                 return None
 
         # Run both tests
