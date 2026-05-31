@@ -1,6 +1,17 @@
 import logging
 import os
 import smtplib
+import warnings
+
+# mitmproxy creates ServerInstance.handle_stream coroutines that are intentionally
+# dropped on shutdown; CPython then emits a benign RuntimeWarning at GC time. The
+# location reported by the warning is wherever GC ran (e.g. json/decoder.py), so we
+# match on the coroutine name/category rather than module.
+warnings.filterwarnings(
+    "ignore",
+    message=r"coroutine '.*handle_stream' was never awaited",
+    category=RuntimeWarning,
+)
 import zipfile
 import pandas as pd
 from email.mime.application import MIMEApplication
@@ -1126,6 +1137,58 @@ headers = {
     "Cache-Control": "no-cache",
 }
 
+_IGNORED_PROXY_HOSTS = frozenset({
+    "firefox-settings-attachments.cdn.mozilla.net",
+    "content-signature-2.cdn.mozilla.net",
+    "firefox.settings.services.mozilla.com",
+    "streamer.nseindia.com",
+})
+
+_IGNORED_PROXY_HOST_SUFFIXES = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+    "gstatic.com",
+    "mozilla.net",
+)
+
+_BENIGN_PROXY_ERROR_MESSAGES = frozenset({
+    "connection cancelled",
+    "peer closed connection",
+    "client disconnected",
+    "connection closed",
+})
+
+
+def _is_ignored_proxy_host(host: str) -> bool:
+    if not host:
+        return False
+    if host in _IGNORED_PROXY_HOSTS:
+        return True
+    host_l = host.lower()
+    return any(host_l == suffix or host_l.endswith("." + suffix) for suffix in _IGNORED_PROXY_HOST_SUFFIXES)
+
+
+def _effective_proxy_test_url(url: str) -> str:
+    """NSE homepage often 403 via proxy; option-chain is used for cookie/session validation."""
+    if "nseindia.com" in (url or ""):
+        return "https://www.nseindia.com/option-chain"
+    return url
+
+
+def _webdriver_get_with_alerts(driver, url: str) -> None:
+    from selenium.common.exceptions import NoAlertPresentException, UnexpectedAlertPresentException
+
+    for _attempt in range(2):
+        try:
+            driver.get(url)
+            return
+        except UnexpectedAlertPresentException:
+            try:
+                driver.switch_to.alert.dismiss()
+            except NoAlertPresentException:
+                pass
+
 
 class MitmProxyServer:
     """Manages a local mitmproxy server that forwards to upstream proxy with authentication"""
@@ -1140,6 +1203,7 @@ class MitmProxyServer:
         self.server_thread = None
         self._loop = None
         self.running = False
+        self._shutting_down = False
         self.needs_new_upstream = False  # Flag to indicate upstream proxy needs to be changed
 
     @staticmethod
@@ -1236,66 +1300,65 @@ class MitmProxyServer:
             proxy_pass = self.proxy_pass
             
             class ProxyAddon:
-                def __init__(self, upstream_proxy, proxy_user, proxy_pass):
+                def __init__(self, upstream_proxy, proxy_user, proxy_pass, server_ref):
                     self.upstream_proxy = upstream_proxy
                     self.proxy_user = proxy_user
                     self.proxy_pass = proxy_pass
-                    # Pre-compute auth header
+                    self._server = server_ref
                     auth_string = f"{self.proxy_user}:{self.proxy_pass}"
                     self.auth_header = base64.b64encode(auth_string.encode()).decode()
                 
                 def http_connect_upstream(self, flow: http.HTTPFlow) -> None:
-                    """Handle upstream CONNECT requests - add Proxy-Authorization header"""
-                    # This hook is called when mitmproxy sends a CONNECT request to the upstream proxy
                     auth_string = f"{self.proxy_user}:{self.proxy_pass}"
                     auth_header = base64.b64encode(auth_string.encode()).decode()
                     flow.request.headers["Proxy-Authorization"] = f"Basic {auth_header}"
-                    get_chameli_logger().log_info(
-                        f"Proxy CONNECT upstream: {flow.request.pretty_url} (auth header set)",
-                        {"method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.http_connect_upstream"}
-                    )
 
                 def request(self, flow: http.HTTPFlow) -> None:
-                    # Add Proxy-Authorization header for regular HTTP requests going through upstream proxy
-                    # (CONNECT requests are handled in http_connect_upstream)
                     if flow.request.method != "CONNECT":
                         flow.request.headers["Proxy-Authorization"] = f"Basic {self.auth_header}"
-                    
-                    # Log CONNECT requests from client
-                    if flow.request.method == "CONNECT":
-                        get_chameli_logger().log_info(
-                            f"Proxy CONNECT from client: {flow.request.pretty_url}",
-                            {"method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.request"}
-                        )
                 
-                _IGNORED_PROXY_HOSTS = frozenset({
-                    "firefox-settings-attachments.cdn.mozilla.net",
-                    "content-signature-2.cdn.mozilla.net",
-                })
-
                 def response(self, flow: http.HTTPFlow) -> None:
-                    if flow.response.status_code >= 400:
-                        if flow.request.pretty_host in self._IGNORED_PROXY_HOSTS:
-                            return
-                        get_chameli_logger().log_warning(
-                            f"Proxy error response: {flow.response.status_code} for {flow.request.pretty_url}",
-                            {"status_code": flow.response.status_code, "method": flow.request.method, "url": flow.request.pretty_url, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.ProxyAddon.response"}
-                        )
+                    if not flow.response or flow.response.status_code < 400:
+                        return
+                    host = flow.request.pretty_host or ""
+                    if _is_ignored_proxy_host(host):
+                        return
+                    if flow.response.status_code == 404:
+                        return
+                    path = flow.request.path or ""
+                    if host.endswith("nseindia.com") and path.startswith("/media/"):
+                        return
+                    if flow.response.status_code < 500:
+                        return
+                    get_chameli_logger().log_warning(
+                        f"Proxy error response: {flow.response.status_code} for {flow.request.pretty_url}",
+                        {
+                            "status_code": flow.response.status_code,
+                            "method": flow.request.method,
+                            "url": flow.request.pretty_url,
+                            "upstream_proxy": self.upstream_proxy,
+                            "function": "MitmProxyServer.ProxyAddon.response",
+                        },
+                    )
                 
                 def error(self, flow: http.HTTPFlow) -> None:
-                    """Handle connection-level errors (like CONNECT failures)"""
-                    if flow.error:
-                        error_msg = flow.error.msg if hasattr(flow.error, 'msg') else str(flow.error)
-                        # Log connection errors as warnings
-                        get_chameli_logger().log_warning(
-                            f"Proxy connection error: {error_msg}",
-                            {
-                                "error_msg": error_msg,
-                                "url": flow.request.pretty_url if flow.request else "N/A",
-                                "upstream_proxy": self.upstream_proxy,
-                                "function": "MitmProxyServer.ProxyAddon.error"
-                            }
-                        )
+                    if not flow.error or self._server._shutting_down:
+                        return
+                    error_msg = flow.error.msg if hasattr(flow.error, "msg") else str(flow.error)
+                    if error_msg.lower() in _BENIGN_PROXY_ERROR_MESSAGES:
+                        return
+                    host = flow.request.pretty_host if flow.request else ""
+                    if _is_ignored_proxy_host(host):
+                        return
+                    get_chameli_logger().log_warning(
+                        f"Proxy connection error: {error_msg}",
+                        {
+                            "error_msg": error_msg,
+                            "url": flow.request.pretty_url if flow.request else "N/A",
+                            "upstream_proxy": self.upstream_proxy,
+                            "function": "MitmProxyServer.ProxyAddon.error",
+                        },
+                    )
             
             # Start server in background thread with its own event loop
             # Capture actual_port in closure
@@ -1307,31 +1370,31 @@ class MitmProxyServer:
                 asyncio.set_event_loop(loop)
                 self._loop = loop
                 try:
-                    get_chameli_logger().log_info(
+                    get_chameli_logger().log_debug(
                         f"Starting mitmproxy in thread",
                         {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                     )
 
                     async def create_master():
-                        get_chameli_logger().log_info(
+                        get_chameli_logger().log_debug(
                             f"Creating DumpMaster",
                             {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
                         )
                         self.master = DumpMaster(opts)
-                        self.master.addons.add(ProxyAddon(upstream_proxy, proxy_user, proxy_pass))
-                        get_chameli_logger().log_info(
+                        self.master.addons.add(ProxyAddon(upstream_proxy, proxy_user, proxy_pass, self))
+                        get_chameli_logger().log_debug(
                             f"DumpMaster created",
                             {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.create_master"}
                         )
                         return self.master
 
-                    get_chameli_logger().log_info(
+                    get_chameli_logger().log_debug(
                         f"Starting event loop for mitmproxy",
                         {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                     )
                     try:
                         master = loop.run_until_complete(create_master())
-                        get_chameli_logger().log_info(
+                        get_chameli_logger().log_debug(
                             f"Calling master.run()",
                             {"local_port": captured_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.run_proxy"}
                         )
@@ -1414,6 +1477,7 @@ class MitmProxyServer:
 
     def stop(self, join_timeout=5.0):
         """Stop the mitmproxy server and wait for its asyncio tasks to finish."""
+        self._shutting_down = True
         thread = self.server_thread
         if not self.master and not (thread and thread.is_alive()):
             self.running = False
@@ -1773,7 +1837,7 @@ def get_session_or_driver(
             if "nseindia.com" not in url_to_test:
                 cookie_urls.append("https://www.nseindia.com/option-chain")
             for cookie_url in cookie_urls:
-                driver.get(cookie_url)
+                _webdriver_get_with_alerts(driver, cookie_url)
             cookies = driver.get_cookies()
             for cookie in cookies:
                 s.cookies.set(cookie["name"], cookie["value"], domain=cookie.get("domain"))
@@ -1858,32 +1922,41 @@ def get_session_or_driver(
 
         # Test with requests
         def test_with_requests(proxy, proxy_user, proxy_password, default_timeout=default_timeout):
+            validation_url = _effective_proxy_test_url(test_url)
             try:
                 s = setup_session_with_proxy_auth(proxy, proxy_user, proxy_password)
-                response = s.get(test_url, timeout=default_timeout)
-                if response.status_code == 200:
+                response = s.get(validation_url, timeout=default_timeout)
+                if 200 <= response.status_code < 400:
                     get_chameli_logger().log_info(
                         f"Successfully tested proxy {proxy} with requests session",
-                        {"proxy": proxy, "test_url": test_url, "function": "test_with_requests"},
+                        {
+                            "proxy": proxy,
+                            "test_url": validation_url,
+                            "function": "test_with_requests",
+                        },
                     )
                     return s
                 get_chameli_logger().log_warning(
                     f"Proxy {proxy} returned HTTP {response.status_code} for session test",
                     {
                         "proxy": proxy,
-                        "test_url": test_url,
+                        "test_url": validation_url,
                         "status_code": response.status_code,
                         "function": "test_with_requests",
                     },
                 )
                 return None
             except Exception as e:
-                get_chameli_logger().log_warning(
+                error_type = type(e).__name__
+                log_fn = get_chameli_logger().log_warning
+                if error_type == "UnexpectedAlertPresentException":
+                    log_fn = get_chameli_logger().log_debug
+                log_fn(
                     f"Proxy session test failed for {proxy}: {e}",
                     {
                         "proxy": proxy,
-                        "test_url": test_url,
-                        "error_type": type(e).__name__,
+                        "test_url": validation_url,
+                        "error_type": error_type,
                         "function": "test_with_requests",
                     },
                 )

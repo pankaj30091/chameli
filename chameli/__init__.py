@@ -347,6 +347,10 @@ def configure_logging(
         for handler in handlers:
             root_logger.addHandler(handler)
 
+        # Route chameli logger through root only (avoid duplicate file/console lines)
+        chameli_logger.logger.handlers.clear()
+        chameli_logger.logger.propagate = True
+
     # Configure specific modules if requested
     if module_names:
         for module_name in module_names:
