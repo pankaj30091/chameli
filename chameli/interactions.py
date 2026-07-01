@@ -1152,12 +1152,19 @@ _IGNORED_PROXY_HOST_SUFFIXES = (
     "mozilla.net",
 )
 
-_BENIGN_PROXY_ERROR_MESSAGES = frozenset({
+_BENIGN_PROXY_ERROR_SUBSTRINGS = (
     "connection cancelled",
     "peer closed connection",
     "client disconnected",
     "connection closed",
-})
+    "http/2 connection closed",
+    "errorcodes.no_error",
+)
+
+
+def _is_benign_proxy_connection_error(error_msg: str) -> bool:
+    msg_l = (error_msg or "").lower()
+    return any(s in msg_l for s in _BENIGN_PROXY_ERROR_SUBSTRINGS)
 
 
 def _is_ignored_proxy_host(host: str) -> bool:
@@ -1345,19 +1352,24 @@ class MitmProxyServer:
                     if not flow.error or self._server._shutting_down:
                         return
                     error_msg = flow.error.msg if hasattr(flow.error, "msg") else str(flow.error)
-                    if error_msg.lower() in _BENIGN_PROXY_ERROR_MESSAGES:
-                        return
                     host = flow.request.pretty_host if flow.request else ""
                     if _is_ignored_proxy_host(host):
                         return
+                    ctx = {
+                        "error_msg": error_msg,
+                        "url": flow.request.pretty_url if flow.request else "N/A",
+                        "upstream_proxy": self.upstream_proxy,
+                        "function": "MitmProxyServer.ProxyAddon.error",
+                    }
+                    if _is_benign_proxy_connection_error(error_msg):
+                        get_chameli_logger().log_info(
+                            f"Proxy connection closed (benign): {error_msg}",
+                            ctx,
+                        )
+                        return
                     get_chameli_logger().log_warning(
                         f"Proxy connection error: {error_msg}",
-                        {
-                            "error_msg": error_msg,
-                            "url": flow.request.pretty_url if flow.request else "N/A",
-                            "upstream_proxy": self.upstream_proxy,
-                            "function": "MitmProxyServer.ProxyAddon.error",
-                        },
+                        ctx,
                     )
             
             # Start server in background thread with its own event loop
