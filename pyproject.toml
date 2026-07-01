@@ -27,7 +27,7 @@ include-package-data = true
 
 [project]
 name = "chameli"  
-version = "0.1.16"  
+version = "0.1.17"  
 description = "A lightweight Python library for python utilities for holidays, dates, options and other tools"
 readme = "README.md"
 license = "MIT"
