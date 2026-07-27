@@ -454,6 +454,31 @@ def calc_fractional_business_days(
     return biz_days + front_stub - end_stub  # subtract end_stub as biz_days includes end_date
 
 
+def calc_fractional_calendar_days(
+    start_datetime: Union[str, dt.datetime, dt.date, pd.Timestamp],
+    end_datetime: Union[str, dt.datetime, dt.date, pd.Timestamp],
+) -> float:
+    """Return elapsed calendar days, including fractional days, between two timestamps.
+
+    Date-only inputs are interpreted as midnight. Unlike
+    :func:`calc_fractional_business_days`, this function does not exclude
+    weekends, holidays, or non-market hours.
+
+    Raises:
+        ValueError: If either input is invalid or the end precedes the start.
+    """
+    try:
+        start_dt = parse_datetime(start_datetime)
+        end_dt = parse_datetime(end_datetime)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid date format: {e}") from e
+
+    elapsed_seconds = (end_dt - start_dt).total_seconds()
+    if elapsed_seconds < 0:
+        raise ValueError("End time cannot be earlier than start time")
+    return elapsed_seconds / 86_400.0
+
+
 def advance_by_biz_days(
     datetime_: Union[str, pd.Timestamp, dt.datetime, dt.date],
     days: int,
