@@ -1244,6 +1244,12 @@ class MitmProxyServer:
     def _find_available_port(self, start_port=8080, max_attempts=10):
         """Find an available port starting from start_port"""
         import socket
+
+        if start_port == 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                return sock.getsockname()[1]
+
         for offset in range(max_attempts):
             port = start_port + offset
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1267,6 +1273,9 @@ class MitmProxyServer:
             # Try to find an available local port if preferred port is busy.
             actual_port = self.local_port
             import socket
+            if actual_port == 0:
+                actual_port = self._find_available_port(0)
+                self.local_port = actual_port
             test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             test_sock.settimeout(0.1)
             port_in_use = test_sock.connect_ex(("127.0.0.1", actual_port)) == 0
@@ -1469,17 +1478,9 @@ class MitmProxyServer:
                     test_sock.close()
                     pass
             
-            # Check if thread is still alive (server might be starting)
-            if self.server_thread.is_alive():
-                get_chameli_logger().log_warning(
-                    f"mitmproxy server thread is alive but port {actual_port} not yet accepting connections, marking as running anyway",
-                    {"local_port": actual_port, "upstream_proxy": self.upstream_proxy, "function": "MitmProxyServer.start"}
-                )
-                self.running = True
-                return
-            
             raise Exception(f"mitmproxy server started but port {actual_port} is not accepting connections after {max_attempts} attempts")
         except Exception as e:
+            self.stop()
             get_chameli_logger().log_error(
                 f"Failed to start mitmproxy server",
                 e,
@@ -1492,15 +1493,33 @@ class MitmProxyServer:
         self._shutting_down = True
         thread = self.server_thread
         if not self.master and not (thread and thread.is_alive()):
+            self.server_thread = None
+            self._loop = None
             self.running = False
             return
 
         master = self.master
         if master:
             try:
-                master.shutdown()
+                import asyncio
+
+                async def shutdown_proxy():
+                    proxy_server = master.addons.get("proxyserver")
+                    if proxy_server:
+                        await proxy_server.servers.update([])
+                    master.shutdown()
+
+                loop = self._loop
+                if loop and loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(shutdown_proxy(), loop)
+                    future.result(timeout=join_timeout)
+                else:
+                    master.shutdown()
             except Exception:
-                pass
+                try:
+                    master.shutdown()
+                except Exception:
+                    pass
 
         if thread and thread.is_alive():
             thread.join(timeout=join_timeout)
@@ -1690,7 +1709,7 @@ def get_session_or_driver(
                         upstream_proxy=f"{proxy_ip}:{proxy_port}",
                         proxy_user=proxy_user,
                         proxy_pass=proxy_pass,
-                        local_port=8080,
+                        local_port=0,
                         upstream_scheme=upstream_scheme,
                     )
                     instance_proxy_server.start()
@@ -1804,14 +1823,20 @@ def get_session_or_driver(
             original_quit = driver.quit
             def _quit_with_cleanup(_orig=original_quit, _srv=instance_proxy_server):
                 try:
-                    _srv.stop()
-                except Exception:
-                    pass
-                _orig()
+                    return _orig()
+                finally:
+                    try:
+                        _srv.stop()
+                    except Exception:
+                        pass
             setattr(driver, "quit", _quit_with_cleanup)
 
-        for key, value in headers.items():
-            driver.execute_script(f"Object.defineProperty(navigator, '{key}', {{get: () => '{value}'}});")
+        try:
+            for key, value in headers.items():
+                driver.execute_script(f"Object.defineProperty(navigator, '{key}', {{get: () => '{value}'}});")
+        except Exception:
+            driver.quit()
+            raise
         return driver
 
     def setup_session_with_proxy_auth(
